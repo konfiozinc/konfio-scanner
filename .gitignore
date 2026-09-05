@@ -1,0 +1,9 @@
+venv/
+venv311/
+__pycache__/
+*.pyc
+whatsapp_bridge/node_modules/
+whatsapp_bridge/sesion/
+*.log
+*_pid.txt
+.env

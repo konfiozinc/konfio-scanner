@@ -1,0 +1,29 @@
+# ============================================================
+# AppALI GSR Scanner - dependencias
+# ============================================================
+# Probadas y en uso en el venv actual de esta carpeta (Python 3.14).
+# NOTA: las versiones antiguas (numpy==1.26.4, pandas==2.2.1) NO tienen
+# ruedas para Python 3.14 y hacian fallar una instalacion limpia.
+
+fastapi==0.141.1
+uvicorn==0.52.4
+numpy==2.5.2
+pandas==3.0.5
+ta==0.11.0
+
+# ------------------------------------------------------------
+# Conexion REAL con IQ Option (OPCIONAL - NO instalar por ahora)
+# ------------------------------------------------------------
+# El paquete de PyPI "iqoptionapi==0.5" es OTRA libreria distinta:
+# no trae "iqoptionapi.stable_api", depende de "requests" (ausente)
+# y NO es compatible con app_ali.py.
+#
+# app_ali.py espera la libreria clasica que expone:
+#     from iqoptionapi.stable_api import IQ_Option
+# (metodos: connect, change_balance, get_server_timestamp,
+#  check_connect, get_candles)
+#
+# Esa libreria clasica (github: iqoptionapi/iqoptionapi) suele requerir
+# Python <= 3.11. Si se desea el modo real del broker, crear un venv con
+# Python 3.11 (venv311) e instalarla desde GitHub. Sin ella, la app corre
+# en SIMULACION (la interfaz web funciona igual).
