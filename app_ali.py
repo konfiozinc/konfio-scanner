@@ -63,6 +63,12 @@ IQ_MODE = os.environ.get("IQ_ACCOUNT_TYPE", "PRACTICE")
 WHATSAPP_BRIDGE_URL = os.environ.get("WHATSAPP_BRIDGE_URL", "http://127.0.0.1:8120")
 WHATSAPP_BRIDGE_ENABLED = os.environ.get("WHATSAPP_BRIDGE_ENABLED", "1") == "1"
 
+# Publicación automática de señales en la app Alí Binary Options (Firebase).
+# APP_SIGNAL_URL = URL de la Cloud Function 'postSignal'. Si está vacío, NO se
+# publica (desactivado por defecto hasta desplegar la función).
+APP_SIGNAL_URL = os.environ.get("APP_SIGNAL_URL", "")
+APP_SIGNAL_SECRET = os.environ.get("APP_SIGNAL_SECRET", "CAMBIA_ESTE_SECRETO")
+
 # Modo diagnóstico: BROKER_DIAGNOSTIC=1 imprime el estado real del broker al conectar.
 BROKER_DIAGNOSTIC = os.environ.get("BROKER_DIAGNOSTIC", "0") == "1"
 
@@ -1032,6 +1038,37 @@ def enviar_alerta_whatsapp(mensaje: str):
         log.warning(f"[WA] Alerta al grupo no enviada (¿puente apagado?): {e}")
 
 
+def enviar_alerta_app(asset, direction, rsi, damoa, strength, entry_time_cot):
+    """Publica la señal en la app Alí Binary Options vía Cloud Function HTTP.
+    Desactivada si APP_SIGNAL_URL está vacío. Nunca rompe el escáner."""
+    if not APP_SIGNAL_URL:
+        return
+    try:
+        import json as _json
+        import urllib.request as _urllib
+        payload = _json.dumps({
+            "secret": APP_SIGNAL_SECRET,
+            "asset": broker_search_name(asset),      # "EUR/USD" o "EUR/USD (OTC)"
+            "broker": "IQ Option",
+            "direction": direction,
+            "entryTime": entry_time_cot,              # "HH:MM" hora Colombia
+            "expiration": 1,
+            "source": "bot",
+            "botName": "AppALI",
+            "strategy": "GSR",
+            "confidence": int(strength),
+            "rsi": round(rsi, 2),
+            "damoa": round(damoa, 2)
+        }).encode("utf-8")
+        req = _urllib.Request(APP_SIGNAL_URL, data=payload,
+                              headers={"Content-Type": "application/json"})
+        with _urllib.urlopen(req, timeout=5) as resp:
+            resp.read()
+        log.info("[APP] Señal publicada en la app Alí Binary Options")
+    except Exception as e:
+        log.warning(f"[APP] No se pudo publicar la señal en la app: {e}")
+
+
 def validate_signal_eligibility(asset) -> tuple:
     """Devuelve (True, 'OK') solo si TODO es válido antes de emitir señal.
     Orden: conexión → disponibilidad → activo OPEN → velas actuales."""
@@ -1095,6 +1132,17 @@ def fire_signal(asset, opening, indicator):
             f"⚠️ Señal automática de estrategia. No es consejo financiero."
         )
         threading.Thread(target=enviar_alerta_whatsapp, args=(alerta,), daemon=True).start()
+
+        # === PUBLICAR EN LA APP ALÍ BINARY OPTIONS (opcional, vía Cloud Function) ===
+        try:
+            hora_cot = datetime.fromtimestamp(int(opening.timestamp), tz=TZ_COLOMBIA).strftime("%H:%M")
+        except Exception:
+            hora_cot = ""
+        threading.Thread(
+            target=enviar_alerta_app,
+            args=(asset, state.direction, state.rsi, state.damoa, 75.0, hora_cot),
+            daemon=True
+        ).start()
 
 class GSREventEngine:
     def __init__(self):
