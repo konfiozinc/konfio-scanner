@@ -15,11 +15,10 @@ echo ====================================================
 echo.
 
 :: ------------------------------------------------------------------
-:: Credenciales de entorno (tambien estan como valores por defecto en app_ali.py)
+:: Credenciales: se leen del archivo .env (local, ignorado por git) o del
+:: entorno. Ver .env.example. NO se hardcodean aqui.
 :: ------------------------------------------------------------------
-set "IQ_EMAIL=***REDACTED***"
-set "IQ_PASSWORD=***REDACTED***"
-set "IQ_ACCOUNT_TYPE=PRACTICE"
+if not defined IQ_ACCOUNT_TYPE set "IQ_ACCOUNT_TYPE=PRACTICE"
 
 :: ------------------------------------------------------------------
 :: Elegir el Python:

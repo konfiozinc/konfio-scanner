@@ -45,8 +45,17 @@ VERSION = "7.5-PROD"
 HOST = "0.0.0.0"
 PORT = 8000
 
-IQ_EMAIL = os.environ.get("IQ_EMAIL", "***REDACTED***")
-IQ_PASSWORD = os.environ.get("IQ_PASSWORD", "***REDACTED***")
+# Carga de credenciales desde un archivo .env LOCAL (ignorado por git).
+# Las credenciales NO van hardcodeadas en el código: se leen del entorno o del
+# .env (ver .env.example). Si faltan, la app corre en simulación.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except Exception:
+    pass
+
+IQ_EMAIL = os.environ.get("IQ_EMAIL", "")
+IQ_PASSWORD = os.environ.get("IQ_PASSWORD", "")
 IQ_MODE = os.environ.get("IQ_ACCOUNT_TYPE", "PRACTICE")
 
 # Puente local de WhatsApp (publica las señales en el grupo de la comunidad).
