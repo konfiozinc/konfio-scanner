@@ -438,6 +438,24 @@ FX_CURRENCIES = {
     "BGN", "SAR", "AED", "QAR", "KWD", "JOD", "BHD", "OMR", "HRK",
 }
 
+# --- Lista curada: pares MÁS COMUNES (por liquidez/uso) ---
+# Se priorizan estos pares para no saturar con 80+ instrumentos: cada par puede
+# aparecer como REAL (-OP) y OTC (-OTC), ~50 activos en total. Ordenados por
+# relevancia; los primeros tienen prioridad si hay que recortar.
+COMMON_PAIR_RANK = {code: i for i, code in enumerate([
+    # 1) Pares mayores (los más operados)
+    "EURUSD", "USDJPY", "GBPUSD", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
+    # 2) Mercados emergentes / LatAm (relevantes para este proyecto)
+    "USDCOP", "USDBRL", "USDMXN", "USDZAR", "USDTRY", "USDINR",
+    # 3) Cruces principales
+    "EURJPY", "EURGBP", "GBPJPY", "EURCHF", "AUDJPY", "EURAUD", "EURCAD",
+    "GBPCHF", "CADJPY", "CHFJPY", "AUDCAD", "AUDNZD", "NZDJPY", "EURNZD",
+    "GBPAUD", "GBPCAD", "GBPNZD", "NZDCAD", "NZDCHF",
+    # 4) Otros líquidos (Asia/EM)
+    "USDSGD", "USDHKD", "USDTHB", "USDCLP", "USDPHP", "USDPLN",
+])}
+MAX_UNIVERSE = 50   # tope de activos monitoreados (~50 más comunes)
+
 class LiveAssetManager:
     """Gestor Dinámico de Activos."""
     def __init__(self):
@@ -446,24 +464,26 @@ class LiveAssetManager:
         self._lock = threading.Lock()
 
     def get_candidate_list(self) -> List[Tuple[str, str]]:
-        # UNIVERSO DINÁMICO desde el snapshot real del broker (binary/turbo).
-        # Solo divisas: mercado REAL (-OP) y OTC (-OTC), validado por código de
-        # 6 letras + lista de divisas (independiente de la descripción, que en
-        # el broker es irregular: "front.EUR/USD", "front.EURUSD", ...).
+        # UNIVERSO CURADO desde el snapshot del broker: solo los pares más
+        # comunes (COMMON_PAIR_RANK), REAL (-OP) y OTC (-OTC), con tope ~50.
+        # Reduce streams y carga sobre la conexión.
         if not broker_market.assets:
             return []
-        forex = []
+        ranked = []
         for name, info in broker_market.assets.items():
             if not FOREX_CODE_RE.match(name):
                 continue
             code = name[:6]            # el código de 6 letras (EURUSD)
+            rank = COMMON_PAIR_RANK.get(code)
+            if rank is None:
+                continue               # no está en la lista de pares comunes
             base, quote = code[:3], code[3:]
             if (base not in FX_CURRENCIES) or (quote not in FX_CURRENCIES):
                 continue
             tipo = "OTC" if name.endswith("-OTC") else "REAL"
-            forex.append((name, tipo))
-        forex.sort(key=lambda x: x[0])
-        return forex
+            ranked.append((name, tipo, rank))
+        ranked.sort(key=lambda x: (x[2], x[0]))   # prioridad y orden alfabético
+        return [(n, t) for n, t, _ in ranked[:MAX_UNIVERSE]]
 
     def update_status(self, status: AssetTradingStatus):
         with self._lock:
@@ -1488,6 +1508,10 @@ class BrokerMarketState:
         self.assets = {}             # nombre -> {'id','type','open','suspended','source'}
         self.updated_at = 0
         self.last_error = ""
+        # Tolerancia: si un refresco del catálogo falla de forma transitoria
+        # (STALE), seguimos usando el último snapshot conocido durante esta
+        # ventana en lugar de cerrar TODO el mercado.
+        self.stale_grace = 600.0
 
     def refresh(self):
         try:
@@ -1563,7 +1587,15 @@ class BrokerMarketState:
 
     def valid(self):
         with self.lock:
-            return self.status == "LIVE"
+            if self.status == "LIVE":
+                return True
+            # Degradación suave: un fallo transitorio del refresco NO debe
+            # cerrar todo el mercado. Mientras tengamos un snapshot reciente,
+            # la frescura de las velas decide el estado real de cada activo.
+            if (self.status == "STALE" and self.assets
+                    and (int(time.time()) - self.updated_at) < self.stale_grace):
+                return True
+            return False
 
 broker_market = BrokerMarketState()
 
@@ -1994,7 +2026,9 @@ ws.onmessage = (event) => {
 
     if (d.proximity_v2 && d.proximity_v2.length > 0) {
         d.proximity_v2.forEach(row => {
-            const reasonText = row.reason.length > 0 ? row.reason.join(" | ") : "PATRÓN GSR COMPLETO";
+            const reasonText = row.status !== 'OPEN'
+                ? (row.status || 'CERRADO')
+                : (row.reason && row.reason.length > 0 ? row.reason.join(" | ") : "PATRÓN GSR COMPLETO");
             const typeClass = row.type === 'REAL' ? 'type-real' : 'type-otc';
 
             board.innerHTML += `
