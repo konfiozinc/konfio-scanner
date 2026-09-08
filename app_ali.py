@@ -488,6 +488,12 @@ class LiveAssetManager:
         for name, info in broker_market.assets.items():
             if not FOREX_CODE_RE.match(name):
                 continue
+            # SOLO activos operables a 1 MINUTO (vencimiento 60 s). Si el broker
+            # reporta vencimientos y 60 s no está entre ellos, se descarta
+            # (p. ej. USD/CHF (OP), USD/BRL (OP): solo 2m/5m+).
+            ets = info.get("exp_times") or []
+            if ets and 60 not in ets:
+                continue
             code = name[:6]            # el código de 6 letras (EURUSD)
             rank = COMMON_PAIR_RANK.get(code)
             if rank is None:
@@ -1573,7 +1579,7 @@ class BrokerMarketState:
             return
 
         parsed = {}
-        for option in ("turbo", "binary"):
+        for option in ("turbo", "binary", "blitz"):
             node = data.get(option)
             if not isinstance(node, dict):
                 continue
@@ -1591,15 +1597,31 @@ class BrokerMarketState:
                     continue
                 enabled = bool(v.get("enabled", False))
                 suspended = bool(v.get("is_suspended", False))
-                parsed[name] = {
-                    "id": _aid,
-                    "type": option.upper(),
-                    "open": enabled and not suspended,
-                    "suspended": suspended,
-                    "source": "IQ_OPTION",
-                    "desc": str(v.get("description", "")),
-                    "exchange": str(v.get("exchange", ""))
-                }
+                # Vencimientos disponibles (segundos): 60 = 1 min, 300 = 5 min...
+                # El MISMO activo aparece en varias listas (turbo/binary/blitz);
+                # se hace la UNIÓN para conocer si se puede operar a 1 minuto.
+                opt = v.get("option") or {}
+                exp = sorted({int(x) for x in (opt.get("expiration_times") or []) if str(x).isdigit() or isinstance(x, int)})
+                if name not in parsed:
+                    parsed[name] = {
+                        "id": _aid,
+                        "type": option.upper(),
+                        "open": enabled and not suspended,
+                        "suspended": suspended,
+                        "source": "IQ_OPTION",
+                        "desc": str(v.get("description", "")),
+                        "exchange": str(v.get("exchange", "")),
+                        "exp_times": exp,
+                    }
+                else:
+                    # fusionar expiraciones y considerar abierto si alguna lista lo tiene
+                    base = parsed[name]
+                    base["exp_times"] = sorted(set(base.get("exp_times") or []) | set(exp))
+                    if enabled and not suspended:
+                        base["open"] = True
+                        base["suspended"] = False
+                    if not base["desc"]:
+                        base["desc"] = str(v.get("description", ""))
                 # Registra el id para poder pedir velas/suscribir streams
                 try:
                     _IQ_ACTIVES_DICT[name] = int(_aid)
