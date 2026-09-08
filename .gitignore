@@ -24,3 +24,7 @@ signals_audit.csv
 
 # Configuracion secreta local (credenciales IQ Option, tokens de grupo)
 .env
+
+# Service account key de Firebase (escritura directa a Firestore) — NO subir
+*service-account*.json
+ali-service-account.json

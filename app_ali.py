@@ -69,6 +69,12 @@ WHATSAPP_BRIDGE_ENABLED = os.environ.get("WHATSAPP_BRIDGE_ENABLED", "1") == "1"
 APP_SIGNAL_URL = os.environ.get("APP_SIGNAL_URL", "")
 APP_SIGNAL_SECRET = os.environ.get("APP_SIGNAL_SECRET", "CAMBIA_ESTE_SECRETO")
 
+# Opción B (sin Cloud Functions): el scanner escribe directo en Firestore con
+# una service account key. FIREBASE_SA_PATH = ruta al JSON de la clave.
+# Vacío = desactivado.
+FIREBASE_SA_PATH = os.environ.get("FIREBASE_SA_PATH", "")
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "ali-binary-options")
+
 # Modo diagnóstico: BROKER_DIAGNOSTIC=1 imprime el estado real del broker al conectar.
 BROKER_DIAGNOSTIC = os.environ.get("BROKER_DIAGNOSTIC", "0") == "1"
 
@@ -1069,6 +1075,36 @@ def enviar_alerta_app(asset, direction, rsi, damoa, strength, entry_time_cot):
         log.warning(f"[APP] No se pudo publicar la señal en la app: {e}")
 
 
+def enviar_alerta_firestore(asset, direction, rsi, damoa, strength, entry_time_cot):
+    """Opción B (sin Cloud Functions): escribe la señal directo en Firestore con
+    una service account key. Desactivada si FIREBASE_SA_PATH está vacío."""
+    if not FIREBASE_SA_PATH:
+        return
+    try:
+        from google.cloud import firestore
+        from google.oauth2 import service_account
+        creds = service_account.Credentials.from_service_account_file(FIREBASE_SA_PATH)
+        db = firestore.Client(project=FIREBASE_PROJECT_ID, credentials=creds)
+        db.collection("signals").add({
+            "asset": broker_search_name(asset),      # "EUR/USD" o "EUR/USD (OTC)"
+            "broker": "IQ Option",
+            "direction": direction,
+            "entryTime": entry_time_cot,              # "HH:MM" hora Colombia
+            "expiration": 1,
+            "status": "pending",
+            "source": "bot",
+            "botName": "AppALI",
+            "strategy": "GSR",
+            "confidence": int(strength),
+            "rsi": round(rsi, 2),
+            "damoa": round(damoa, 2),
+            "createdAt": firestore.SERVER_TIMESTAMP
+        })
+        log.info("[APP] Señal escrita en Firestore (Alí Binary Options)")
+    except Exception as e:
+        log.warning(f"[APP] No se pudo escribir la señal en Firestore: {e}")
+
+
 def validate_signal_eligibility(asset) -> tuple:
     """Devuelve (True, 'OK') solo si TODO es válido antes de emitir señal.
     Orden: conexión → disponibilidad → activo OPEN → velas actuales."""
@@ -1140,6 +1176,13 @@ def fire_signal(asset, opening, indicator):
             hora_cot = ""
         threading.Thread(
             target=enviar_alerta_app,
+            args=(asset, state.direction, state.rsi, state.damoa, 75.0, hora_cot),
+            daemon=True
+        ).start()
+
+        # === Opción B: escribir directo en Firestore (app Alí Binary Options) ===
+        threading.Thread(
+            target=enviar_alerta_firestore,
             args=(asset, state.direction, state.rsi, state.damoa, 75.0, hora_cot),
             daemon=True
         ).start()
