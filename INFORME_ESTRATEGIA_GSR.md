@@ -2,8 +2,11 @@
 
 **Archivo:** `app_ali.py` · **Ruta:** `C:\Users\usuario29\Documents\BOT\SCANNER`
 **Alcance:** análisis de estado y propuesta de mejoras de efectividad.
-**Nota previa:** en esta sesión, además, se **retiraron del universo los activos `-OP`**
-(terminados en `(OP)`); ahora solo se escanean `EURUSD` (REAL) y `EURUSD-OTC`-style (OTC).
+**Nota previa:** en una sesión anterior se retiraron los activos `-OP`, pero se comprobó que en IQ
+Option **`-OP` es el mercado REAL** (forex vivo) y `-OTC` el feed sintético; por eso se **restauró
+`-OP`** (clasificado como REAL). El universo actual se filtra por código de 6 letras + lista de
+divisas (`FX_CURRENCIES`): se escanean tanto los pares REAL (`EURUSD-OP`) como los OTC
+(`EURUSD-OTC`), y se excluyen acciones, crypto y metales.
 
 ---
 

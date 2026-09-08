@@ -76,7 +76,7 @@ start "" /b cmd /c "timeout /t 3 /nobreak >nul & start http://localhost:8000/"
 :iniciar
 echo.
 echo Servidor en:  http://localhost:8000/
-echo Cuenta IQ:    %IQ_EMAIL%   (modo %IQ_ACCOUNT_TYPE%)
+echo Cuenta IQ:    configurada en .env   (modo %IQ_ACCOUNT_TYPE%)
 echo.
 echo Iniciando... (para detener: cierra esta ventana o Ctrl+C)
 echo.

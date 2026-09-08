@@ -75,23 +75,27 @@ XAU/XAG  -> NO_DATA               INTEL/IBM  (OTC) -> CERRADO
 
 Eso inflaba el universo, gastaba llamadas al broker y generaba ruido en el dashboard.
 
-**Corrección:** el candidato ahora debe cumplir **3 condiciones**:
+**Corrección:** el candidato ahora debe cumplir:
 1. El **nombre/código** del activo es un par de 6 letras con sufijo opcional `-OTC`/`-OP`
-   (`EURUSD`, `EURUSD-OTC`, `USDBRL-OP`) → excluye `GOOGLE/MSFT-OTC`, `TESLA/FORD-OTC`, etc.
-2. La **descripción** debe contener un par `XXX/YYY` → excluye acciones sueltas (`GOOGLE`).
-3. Se descartan **metales/commodities** (`XAU`, `XAG`, `XPT`, `XPD`, `XTI`, `XNG`, `OIL`).
+   (`EURUSD-OP`, `EURUSD-OTC`, `USDBRL-OP`) → excluye CFDs de acciones con `/`
+   (`GOOGLE/MSFT-OTC`, `TESLA/FORD-OTC`), índices y crypto con nombre largo.
+2. Las dos mitades de 3 letras del código están en `FX_CURRENCIES` (divisas reales) →
+   excluye acciones sueltas (`AMAZON`), crypto (`BTCUSD`, `ETHUSD`) y metales (`XAUUSD`).
+   No depende de la descripción del broker (que es irregular: `front.EUR/USD`,
+   `front.EURUSD`, `front.EURNZD-op`, ...).
 
-**Verificado:** con un snapshot simulado de 10 instrumentos el resultado es solo forex:
+**Verificado contra el snapshot real del broker:** 83 divisas (29 REAL `-OP` + 54 OTC),
+incluyendo pares que antes se perdían por la descripción (`EURNZD-OP`, `AUDUSD-OTC`, `CADCHF-OP`).
 
 ```python
-[('EURUSD','REAL'), ('EURUSD-OTC','OTC'), ('PENUSD-OTC','OTC'),
- ('USDBRL-OP','REAL'), ('USDCOP-OTC','OTC')]
+('EURUSD-OP','REAL'), ('EURUSD-OTC','OTC'), ('USDCOP-OTC','OTC'),
+('USDBRL-OP','REAL'), ('EURNZD-OP','REAL'), ('GBPUSD-OP','REAL')
 ```
 
-> Nota (actualización posterior): se **retiraron del universo los activos `-OP`** (terminados
-> en `(OP)`). El filtro solo admite `EURUSD`-style (REAL) y `EURUSD-OTC`-style (OTC). En el log
-> los `-OP` aparecían con velas frescas (~12 s), pero son una variante que la estrategia no usa
-> y añadía ruido; se eliminaron por petición del autor.
+> Nota importante (aclaración): en IQ Option el sufijo **`-OP` es el MERCADO REAL** (forex
+> vivo, ej. `EURUSD-OP` desc `front.EUR/USD`) y `-OTC` es el feed sintético. Un retiro previo
+> de los activos `-OP` dejó el panel con **Real Abiertos = 0** y solo OTC; se **restauró `-OP`**
+> (clasificado como REAL) para que el escáner vuelva a operar el mercado real.
 
 ### 3.2 [Corregido] Credenciales de sesión de WhatsApp versionadas en git (riesgo de seguridad)
 **Dónde:** repo git con remoto **`https://github.com/konfiozinc/konfio-scanner.git`**.

@@ -421,17 +421,22 @@ MASTER_CANDIDATE_PAIRS = [
     "EURJPY", "EURGBP", "GBPJPY"
 ]
 
-# --- Filtro estricto de "par de divisas" ---
-# El snapshot del broker trae también CFDs de acciones/metales que NO son forex.
-# Para no gastar llamadas al broker en instrumentos que la estrategia GSR no usa,
-# exigimos que (a) el activo sea un código de 6 letras (ej. EURUSD) y (b) que la
-# descripción sea exactamente un par "XXX/YYY". Se excluyen metales/commodities.
-# Se RETIRAN los activos "-OP" (terminados en "(OP)"): son una variante que el
-# filtro/la estrategia no usa y generaban ruido. Solo se admiten "EURUSD" y
-# "EURUSD-OTC".
-FOREX_CODE_RE = re.compile(r'^[A-Z]{6}(-OTC)?$')
-FOREX_DESC_RE = re.compile(r'[A-Z]{3}/[A-Z]{3}')
-NON_FOREX_CODES = {"XAU", "XAG", "XPT", "XPD", "XTI", "XNG", "OIL"}
+# --- Filtro robusto de "par de divisas" ---
+# En IQ Option el mercado REAL (forex vivo) usa el sufijo "-OP" y el feed
+# sintético usa "-OTC" (ej. EURUSD-OP = EUR/USD real; EURUSD-OTC = OTC).
+# Un instrumento es un par de divisas si su código (sin sufijo) son 6 letras y
+# sus dos mitades de 3 letras están en FX_CURRENCIES. Esto excluye acciones
+# (AMAZON, APPLE...), crypto (BTCUSD, ETHUSD...), metales (XAU, XAG...) e
+# índices, e incluye tanto el mercado REAL (-OP) como el OTC (-OTC).
+FOREX_CODE_RE = re.compile(r'^[A-Z]{6}(-OTC|-OP)?$')
+FX_CURRENCIES = {
+    "EUR", "USD", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD",
+    "COP", "PEN", "MXN", "BRL", "ZAR", "INR", "HKD", "SGD", "THB",
+    "TRY", "PLN", "NOK", "SEK", "DKK", "ILS", "CZK", "HUF", "RON",
+    "IDR", "PHP", "KRW", "TWD", "MYR", "CNY", "CLP", "ARS", "UYU",
+    "EGP", "NGN", "KES", "MAD", "PKR", "LKR", "VND", "KZT", "UAH",
+    "BGN", "SAR", "AED", "QAR", "KWD", "JOD", "BHD", "OMR", "HRK",
+}
 
 class LiveAssetManager:
     """Gestor Dinámico de Activos."""
@@ -442,28 +447,18 @@ class LiveAssetManager:
 
     def get_candidate_list(self) -> List[Tuple[str, str]]:
         # UNIVERSO DINÁMICO desde el snapshot real del broker (binary/turbo).
-        # Solo se escanean instrumentos de divisas que IQ Option realmente
-        # ofrece: 3+3 letras, opcional "-OTC". Sin lista fija.
-        # Sin lista fija. Si aún no hay snapshot, no hay universo (bloqueo honesto).
+        # Solo divisas: mercado REAL (-OP) y OTC (-OTC), validado por código de
+        # 6 letras + lista de divisas (independiente de la descripción, que en
+        # el broker es irregular: "front.EUR/USD", "front.EURUSD", ...).
         if not broker_market.assets:
             return []
         forex = []
         for name, info in broker_market.assets.items():
-            # Pares de divisas ESTRICTOS:
-            #  1) el nombre/código del activo debe ser un par de 6 letras
-            #     (EURUSD) con sufijo OPCIONAL -OTC (se retira -OP): excluye
-            #     de raíz los CFDs de acciones con "/" y la variante "(OP)".
-            #  2) la descripción debe contener un par "XXX/YYY": descarta
-            #     acciones sueltas (GOOGLE, AAPL) que no son pares de divisas.
-            #  3) se descartan metales/commodities (XAU, XAG, XPT, XPD...).
             if not FOREX_CODE_RE.match(name):
-                continue
-            desc = info.get("desc", "").strip()
-            if not FOREX_DESC_RE.search(desc):
                 continue
             code = name[:6]            # el código de 6 letras (EURUSD)
             base, quote = code[:3], code[3:]
-            if (base in NON_FOREX_CODES) or (quote in NON_FOREX_CODES):
+            if (base not in FX_CURRENCIES) or (quote not in FX_CURRENCIES):
                 continue
             tipo = "OTC" if name.endswith("-OTC") else "REAL"
             forex.append((name, tipo))
@@ -1633,6 +1628,7 @@ class ScanController:
         self.scan_time = 0
         self.last_processed_minute = -1
         self.last_market_refresh = 0
+        self.last_clock_sync = 0
 
     def execute(self):
         now_ts = broker_clock.now_ts()
@@ -1644,7 +1640,11 @@ class ScanController:
             market_feed.refresh_market_sessions()
             return
 
-        iq.sync_clock()
+        # Sincronizar el reloj con moderación (el endpoint varía +/-1 s y no se
+        # necesita 2 veces por segundo). Se resincroniza también al reconectar.
+        if now_ts - self.last_clock_sync >= 30:
+            iq.sync_clock()
+            self.last_clock_sync = now_ts
 
         if now_ts - self.last_market_refresh >= 60:
             log.info("[MARKET] Ejecutando refresco dinámico de sesiones de mercado...")
