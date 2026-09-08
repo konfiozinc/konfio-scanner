@@ -471,6 +471,13 @@ COMMON_PAIR_RANK = {code: i for i, code in enumerate([
 ])}
 MAX_UNIVERSE = 50   # tope de activos monitoreados (~50 más comunes)
 
+# Exclusiones explícitas de la variante REAL (-OP) que en la app de IQ Option
+# NO se puede operar a 1 minuto (aunque el catálogo las liste con 60 s):
+# se deja la variante OTC del mismo par (que sí opera a 1 min).
+FORBIDDEN_REAL_M1 = {
+    "EURCHF-OP", "USDCHF-OP", "USDBRL-OP", "NZDJPY-OP",
+}
+
 class LiveAssetManager:
     """Gestor Dinámico de Activos."""
     def __init__(self):
@@ -486,6 +493,8 @@ class LiveAssetManager:
             return []
         ranked = []
         for name, info in broker_market.assets.items():
+            if name in FORBIDDEN_REAL_M1:
+                continue               # variante REAL no operable a 1 min en la app
             if not FOREX_CODE_RE.match(name):
                 continue
             # SOLO activos operables a 1 MINUTO (vencimiento 60 s). Si el broker
