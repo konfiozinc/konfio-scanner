@@ -148,6 +148,21 @@ def format_asset_display_name(raw_asset: str) -> str:
         return f"{base_pair} (OP)"
     return base_pair
 
+
+def broker_search_name(raw_asset: str) -> str:
+    """Nombre para PEGAR en el buscador del broker.
+    En IQ Option el mercado REAL se busca por el par simple ('EUR/USD') y el OTC
+    por el par + '(OTC)'. El sufijo interno '(OP)' NO existe en el broker, por lo
+    que se omite al copiar (así no hay que borrar nada a mano)."""
+    asset = str(raw_asset).upper().strip()
+    is_otc = asset.endswith("-OTC")
+    for suf in ("-OTC", "-OP"):
+        if asset.endswith(suf):
+            asset = asset[:-len(suf)]
+    if len(asset) == 6:
+        asset = f"{asset[:3]}/{asset[3:]}"
+    return f"{asset} (OTC)" if is_otc else asset
+
 # ==========================================================
 # GESTOR DE BITÁCORAS
 # ==========================================================
@@ -855,6 +870,8 @@ class AssetState:
     progress: int = 0
     first_candle: int = 0
     second_candle: int = 0
+    first_close: float = 0.0
+    second_close: float = 0.0
     bb1: float = 0.0
     bb2: float = 0.0
     rsi: float = 50.0
@@ -897,6 +914,7 @@ def detect_first_candle(asset, candle, indicator):
             state.direction = "PUT"
             state.progress = 25
             state.first_candle = candle.timestamp
+            state.first_close = candle.close
             gsr_events.add(asset, "PRIMERA_VELA", "PUT")
             return True
     elif candle_color(candle) == "RED":
@@ -906,6 +924,7 @@ def detect_first_candle(asset, candle, indicator):
             state.direction = "CALL"
             state.progress = 25
             state.first_candle = candle.timestamp
+            state.first_close = candle.close
             gsr_events.add(asset, "PRIMERA_VELA", "CALL")
             return True
     return False
@@ -933,6 +952,7 @@ def detect_second_candle(asset, candle, indicator):
     state.phase = GSRPhase.SEGUNDA_VELA
     state.progress = 50
     state.second_candle = candle.timestamp
+    state.second_close = candle.close
     state.pattern_id = pattern_engine.assign(state)
     gsr_events.add(asset, "SEGUNDA_VELA", state.direction)
     return True
@@ -1166,6 +1186,7 @@ class ProximityEngine:
 
         self.rows[asset] = {
             "asset": display_name,
+            "copy_name": broker_search_name(asset),
             "raw_asset": asset,
             "type": asset_type,
             "status": "OPEN",
@@ -1182,8 +1203,23 @@ class ProximityEngine:
             "reason": reason_engine.explain(indicator)
         }
 
-        self.rows[asset]["progress"] = progress_engine.calculate(self.rows[asset])
-        stage = stage_engine.calculate(self.rows[asset])
+        # Progreso/etapa HONESTOS: 'READY' (100%) solo cuando el patrón secuencial
+        # está validado (fase LISTA). Antes se mostraba READY cuando una sola vela
+        # coincidía con condiciones extremas (parecía señal completa sin serlo) ->
+        # causaba 'señales falsas'. Las fases intermedias muestran su avance real.
+        if state.phase in (GSRPhase.LISTA, GSRPhase.ENTRADA):
+            stage = GSRStage.READY
+            progress = 100
+        elif state.phase == GSRPhase.PRIMERA_VELA:
+            stage = GSRStage.FIRST
+            progress = 25
+        elif state.phase == GSRPhase.SEGUNDA_VELA:
+            stage = GSRStage.SECOND
+            progress = 50
+        else:
+            stage = GSRStage.SEARCH
+            progress = 0
+        self.rows[asset]["progress"] = progress
         self.rows[asset]["stage"] = stage.name
         self.rows[asset]["color"] = stage_color.get(stage.name)
 
@@ -1204,6 +1240,7 @@ class ProximityEngine:
                 estado = st.status.name if st else "CLOSED"
                 fila = {
                     "asset": format_asset_display_name(code),
+                    "copy_name": broker_search_name(code),
                     "raw_asset": code,
                     "type": (st.asset_type if st else "REAL"),
                     "status": estado,
@@ -1239,13 +1276,23 @@ proximity_engine = ProximityEngine()
 
 
 def _confirm_reversal(asset, candle, state) -> bool:
-    """P3: la reversión se confirma con una vela CERRADA que vaya en contra de la
-    dirección del patrón. Un PUT (2 velas verdes) espera una vela roja; un CALL
-    (2 velas rojas) espera una vela verde. Esto reduce falsas señales en tendencia."""
+    """P3 reforzado: la reversión se confirma con una vela CERRADA que vaya EN
+    CONTRA del patrón y que además ROMPA el cierre de la 2ª vela del patrón.
+    Un PUT (2 velas verdes) exige una vela roja que cierre por debajo de la 2ª
+    vela; un CALL exige una verde que cierre por encima. Así se descartan giros
+    débiles (mini-velas contrarias) que provocaban señales falsas."""
     if state.direction == "PUT":
-        return candle.close < candle.open
+        if not (candle.close < candle.open):      # debe ser vela roja
+            return False
+        if state.second_close and candle.close >= state.second_close:
+            return False                          # no rompió el cierre de la 2ª vela
+        return True
     else:
-        return candle.close > candle.open
+        if not (candle.close > candle.open):      # debe ser vela verde
+            return False
+        if state.second_close and candle.close <= state.second_close:
+            return False
+        return True
 
 
 # ==========================================================
@@ -2034,7 +2081,7 @@ ws.onmessage = (event) => {
             board.innerHTML += `
             <tr>
               <td>
-                <span class="asset-name" onclick="copyAsset('${row.asset}', this)" title="Haz clic para copiar">${row.asset}</span>
+                <span class="asset-name" onclick="copyAsset('${row.copy_name}', this)" title="Haz clic para copiar">${row.copy_name}</span>
                 <span class="type-tag ${typeClass}">${row.type}</span>
               </td>
               <td class="score-val">${row.score} pts</td>
