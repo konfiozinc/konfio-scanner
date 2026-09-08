@@ -15,11 +15,24 @@ venv311\Scripts\python.exe app_ali.py
 ```
 O doble clic en `run_scanner.bat` (usa `venv311` y abre http://localhost:8000).
 
+## Credenciales (archivo .env)
+Las credenciales NO van hardcodeadas en el código. Se leen del archivo **`.env`**
+(local, ignorado por git) o de variables de entorno. Crea `SCANNER\.env` a partir de
+`.env.example`:
+
+```ini
+IQ_EMAIL=tu_correo@dominio.com
+IQ_PASSWORD=tu_contraseña
+IQ_ACCOUNT_TYPE=PRACTICE
+WHATSAPP_BRIDGE_URL=http://127.0.0.1:8120
+WHATSAPP_BRIDGE_ENABLED=1
+```
+
 ## Variables de entorno opcionales
 - `BROKER_DIAGNOSTIC=1` → imprime el diagnóstico real del broker al conectar.
 - `WHATSAPP_BRIDGE_URL=http://127.0.0.1:8120` (puente de señales al grupo).
 - `WHATSAPP_BRIDGE_ENABLED=0` → desactiva el envío a WhatsApp.
-- `IQ_EMAIL`, `IQ_PASSWORD`, `IQ_ACCOUNT_TYPE` (PRACTICE/REAL).
+- `IQ_ACCOUNT_TYPE` (PRACTICE/REAL). `IQ_EMAIL`/`IQ_PASSWORD` se toman de `.env`.
 
 ## Arquitectura implementada (IQ Option = fuente de verdad)
 - **BrokerMarketState**: snapshot de disponibilidad vía `get_all_init_v2()`
