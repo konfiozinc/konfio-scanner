@@ -1,9 +1,26 @@
+# Entornos de Python (locales)
 venv/
 venv311/
 __pycache__/
 *.pyc
+
+# Dependencias de Node del puente WhatsApp
 whatsapp_bridge/node_modules/
+
+# --- CREDENCIALES DE SESIÓN WHATSAPP (NO subir a git) ---
+# Sesión activa del puente Baileys: contiene creds.json, sender-keys y
+# sesiones del número dedicado. Nunca debe versionarse.
+whatsapp_bridge/sesion_baileys/
+whatsapp_bridge/qr.txt
+# Sesión vieja del stack anterior (whatsapp-web.js / Puppeteer), ya en desuso.
 whatsapp_bridge/sesion/
+whatsapp_bridge/.wwebjs_cache/
+
+# Salidas generadas en tiempo de ejecución
 *.log
+log_real.txt
 *_pid.txt
+signals_audit.csv
+
+# Configuracion secreta local (credenciales IQ Option, tokens de grupo)
 .env

@@ -68,6 +68,26 @@ DAMOA_HIGH = 10
 DAMOA_LOW = -10
 BODY_OUTSIDE = 40.0
 
+# --- Mejoras P1 / P3 / P4 / P5 ---
+# P1: piso de volatilidad y límite para DAMOA (evita que explote a miles en mercado plano).
+DAMOA_VOL_FLOOR_REL = 1e-6   # piso relativo al precio (RMS >= precio * 1e-6)
+DAMOA_CLAMP = 50.0           # acota |DAMOA| a [±50] para descartar outliers
+# P3: ventana (en velas M1) para esperar la vela que confirma la reversión.
+REVERSAL_CONFIRM_WINDOW = 3
+# P4: filtro de tendencia. Si la separación EMA(fast)-EMA(slow), normalizada por
+# la desviación estándar, supera este umbral el mercado está en tendencia fuerte
+# y NO es idóneo para una reversión a la media (se descarta la señal).
+TREND_FAST = 50
+TREND_SLOW = 150
+TREND_FILTER_Z = 1.0
+# P5: filtro de sesión/liquidez. Solo se "arma" el patrón de reversión en horas
+# de alta liquidez (apertura/cruce Londres–Nueva York). Evita velas erráticas de
+# rollover (21:00–22:00 UTC) y el cierre de fin de semana. Se puede desactivar
+# con SESSION_FILTER_ENABLED=0.
+SESSION_FILTER_ENABLED = os.environ.get("SESSION_FILTER_ENABLED", "1") == "1"
+LIQUID_SESSION_START = 8     # hora UTC (apertura Londres)
+LIQUID_SESSION_END = 17      # hora UTC (cierre Nueva York)
+
 # --- Ventanas de "activo vivo" por tipo (segundos) ---
 # El broker IQ publica velas de 60 s; si un activo esta realmente operando,
 # la ultima vela siempre es reciente. Si el broker lo cierra/pausa, la edad
@@ -247,6 +267,23 @@ def is_forex_real_schedule_open(now_ts: int) -> bool:
     return True
 
 
+def is_liquid_session(now_ts: int) -> bool:
+    """P5: True si estamos en una ventana de alta liquidez apta para la reversión.
+    Descarta el rollover bancario (21:00–22:00 UTC) y el cierre de fin de semana,
+    y acota a la sesión más líquida (LIQUID_SESSION_START–LIQUID_SESSION_END UTC).
+    Útil también para el backtest (P7): usa el timestamp de cada vela, no el real."""
+    dt = datetime.fromtimestamp(int(now_ts), tz=TZ_UTC)
+    if dt.weekday() == 5:                                        # sábado
+        return False
+    if dt.weekday() == 6 and dt.hour < FX_SUNDAY_OPEN_HOUR:      # domingo antes de apertura
+        return False
+    if dt.weekday() == 4 and dt.hour >= FX_FRIDAY_CLOSE_HOUR:    # viernes tras cierre
+        return False
+    if dt.hour == 21:                                            # rollover bancario
+        return False
+    return LIQUID_SESSION_START <= dt.hour < LIQUID_SESSION_END
+
+
 # Catálogo real de activos que soporta la librería (consts de iqoptionapi).
 # Los pares que no estén aquí no se consultan (evita llamadas perdidas).
 try:
@@ -280,6 +317,7 @@ class IndicatorSnapshot:
     damoa: float = 0.0
     body: float = 0.0
     outside: float = 0.0
+    trend_ok: bool = True   # P4: True si NO hay tendencia fuerte (apto para reversión)
 
 @dataclass
 class Signal:
@@ -374,6 +412,18 @@ MASTER_CANDIDATE_PAIRS = [
     "EURJPY", "EURGBP", "GBPJPY"
 ]
 
+# --- Filtro estricto de "par de divisas" ---
+# El snapshot del broker trae también CFDs de acciones/metales que NO son forex.
+# Para no gastar llamadas al broker en instrumentos que la estrategia GSR no usa,
+# exigimos que (a) el activo sea un código de 6 letras (ej. EURUSD) y (b) que la
+# descripción sea exactamente un par "XXX/YYY". Se excluyen metales/commodities.
+# Se RETIRAN los activos "-OP" (terminados en "(OP)"): son una variante que el
+# filtro/la estrategia no usa y generaban ruido. Solo se admiten "EURUSD" y
+# "EURUSD-OTC".
+FOREX_CODE_RE = re.compile(r'^[A-Z]{6}(-OTC)?$')
+FOREX_DESC_RE = re.compile(r'[A-Z]{3}/[A-Z]{3}')
+NON_FOREX_CODES = {"XAU", "XAG", "XPT", "XPD", "XTI", "XNG", "OIL"}
+
 class LiveAssetManager:
     """Gestor Dinámico de Activos."""
     def __init__(self):
@@ -390,10 +440,21 @@ class LiveAssetManager:
             return []
         forex = []
         for name, info in broker_market.assets.items():
-            # Pares de divisas: la DESCRIPCIÓN del broker contiene "XXX/YYY"
-            # (3 letras / 3 letras). Excluye acciones/commodities (GOOGLE, COFFEE…).
-            desc = info.get("desc", "")
-            if not re.search(r'[A-Z]{3}/[A-Z]{3}', desc):
+            # Pares de divisas ESTRICTOS:
+            #  1) el nombre/código del activo debe ser un par de 6 letras
+            #     (EURUSD) con sufijo OPCIONAL -OTC (se retira -OP): excluye
+            #     de raíz los CFDs de acciones con "/" y la variante "(OP)".
+            #  2) la descripción debe contener un par "XXX/YYY": descarta
+            #     acciones sueltas (GOOGLE, AAPL) que no son pares de divisas.
+            #  3) se descartan metales/commodities (XAU, XAG, XPT, XPD...).
+            if not FOREX_CODE_RE.match(name):
+                continue
+            desc = info.get("desc", "").strip()
+            if not FOREX_DESC_RE.search(desc):
+                continue
+            code = name[:6]            # el código de 6 letras (EURUSD)
+            base, quote = code[:3], code[3:]
+            if (base in NON_FOREX_CODES) or (quote in NON_FOREX_CODES):
                 continue
             tipo = "OTC" if name.endswith("-OTC") else "REAL"
             forex.append((name, tipo))
@@ -669,8 +730,25 @@ class IncrementalIndicatorEngine:
 
 indicator_engine = IncrementalIndicatorEngine()
 
+def _trend_ok(close) -> bool:
+    """P4: devuelve True si el mercado NO está en tendencia fuerte (apto para
+    la reversión a la media de GSR). Se bloquea cuando la separación entre una
+    EMA rápida y una lenta, normalizada por la desviación estándar, es grande."""
+    s = pd.Series(close)
+    fast = s.ewm(span=TREND_FAST, adjust=False).mean()
+    slow = s.ewm(span=TREND_SLOW, adjust=False).mean()
+    sep = float((fast - slow).iloc[-1])
+    sd = float(s.rolling(100).std().iloc[-1])
+    if not np.isfinite(sd) or sd <= 0:
+        return True   # sin volatilidad medible -> no bloquear
+    return abs(sep) / sd < TREND_FILTER_Z
+
+
 def calculate_indicators(candles) -> IndicatorSnapshot:
-    close = np.array([x.close for x in candles], dtype=float)
+    # P2: trabajar SOLO con velas cerradas (descartar la vela aún en formación,
+    # candles[-1]) para que BB/RSI/DAMOA y el body-outside apunten al MISMO cierre.
+    closed = candles[:-1]
+    close = np.array([x.close for x in closed], dtype=float)
 
     bb = ta.volatility.BollingerBands(pd.Series(close), window=20, window_dev=2)
     upper = bb.bollinger_hband().iloc[-1]
@@ -681,17 +759,24 @@ def calculate_indicators(candles) -> IndicatorSnapshot:
     df_close = pd.Series(close)
     ema = df_close.ewm(span=5, adjust=False).mean()
     volatilidad_damoa = np.sqrt((df_close.diff() ** 2).rolling(5).mean())
-    damoa_serie = ((df_close - ema) / volatilidad_damoa.replace(0, np.nan)) * 10
-    damoa_val = damoa_serie.fillna(0.0).iloc[-1]
+    # P1: piso de volatilidad para que DAMOA no explote cuando la RMS tiende a 0,
+    # y acotado a ±DAMOA_CLAMP para descartar outliers (ej. los 9564 del CSV).
+    vol_piso = volatilidad_damoa.where(
+        volatilidad_damoa > (df_close.abs() * DAMOA_VOL_FLOOR_REL),
+        df_close.abs() * DAMOA_VOL_FLOOR_REL
+    )
+    damoa_serie = ((df_close - ema) / vol_piso) * 10
+    damoa_val = float(np.clip(damoa_serie.fillna(0.0).iloc[-1], -DAMOA_CLAMP, DAMOA_CLAMP))
 
-    indicator = IndicatorSnapshot(index=len(candles)-1)
+    indicator = IndicatorSnapshot(index=len(closed)-1)
     indicator.bb_upper = upper
     indicator.bb_middle = middle
     indicator.bb_lower = lower
     indicator.rsi = rsi_val
     indicator.damoa = damoa_val
+    indicator.trend_ok = _trend_ok(close)
 
-    current_candle = candles[-2]
+    current_candle = closed[-1]
     indicator.body = abs(current_candle.close - current_candle.open)
     indicator.outside = body_outside_percent(current_candle, indicator)
     return indicator
@@ -754,6 +839,10 @@ class AssetState:
     signal_sent: bool = False
     updated: int = 0
     pattern_id: str = ""
+    # P3: confirmación de reversión (espera de una vela que vaya en contra del
+    # patrón) antes de disparar el mensaje al grupo.
+    reversal_pending: bool = False
+    confirm_deadline: int = 0
 
 class GSRMemory:
     def __init__(self):
@@ -830,6 +919,18 @@ class GSRReadyEngine:
         if state.phase != GSRPhase.SEGUNDA_VELA:
             return False
 
+        # P4: filtro de tendencia. Si el mercado está en tendencia fuerte, la
+        # ruptura de 2 velas tiende a CONTINUAR (no a revertir) -> se descarta.
+        if not indicator.trend_ok:
+            gsr_memory.reset(asset)
+            return False
+
+        # P5: filtro de sesión/liquidez. Solo se arma la reversión en horas líquidas
+        # (evita el rollover y las velas erráticas de baja liquidez).
+        if SESSION_FILTER_ENABLED and not is_liquid_session(int(broker_clock.now_ts())):
+            gsr_memory.reset(asset)
+            return False
+
         if state.direction == "PUT":
             if indicator.rsi < RSI_OVERBOUGHT or indicator.damoa < DAMOA_HIGH:
                 gsr_memory.reset(asset)
@@ -844,6 +945,9 @@ class GSRReadyEngine:
         state.ready = True
         state.rsi = indicator.rsi
         state.damoa = indicator.damoa
+        # P3: entrar en espera de la vela que confirme la reversión.
+        state.reversal_pending = True
+        state.confirm_deadline = int(broker_clock.now_ts()) + REVERSAL_CONFIRM_WINDOW * 60
         gsr_events.add(asset, "LISTA", state.direction)
         return True
 
@@ -1109,6 +1213,17 @@ class ProximityEngine:
 
 proximity_engine = ProximityEngine()
 
+
+def _confirm_reversal(asset, candle, state) -> bool:
+    """P3: la reversión se confirma con una vela CERRADA que vaya en contra de la
+    dirección del patrón. Un PUT (2 velas verdes) espera una vela roja; un CALL
+    (2 velas rojas) espera una vela verde. Esto reduce falsas señales en tendencia."""
+    if state.direction == "PUT":
+        return candle.close < candle.open
+    else:
+        return candle.close > candle.open
+
+
 # ==========================================================
 # PIPELINE DE ESCANEO Y PROCESAMIENTO
 # ==========================================================
@@ -1131,7 +1246,12 @@ class ScannerPipeline:
         if state.phase == GSRPhase.OBSERVANDO: detect_first_candle(asset, previous, indicator)
         elif state.phase == GSRPhase.PRIMERA_VELA: detect_second_candle(asset, current, indicator)
         elif state.phase == GSRPhase.SEGUNDA_VELA: ready_engine.confirm(asset, indicator)
-        elif state.phase == GSRPhase.LISTA: fire_signal(asset, opening, indicator)
+        elif state.phase == GSRPhase.LISTA:
+            # P3: esperar una vela que CONFIRME la reversión antes de disparar.
+            if current.timestamp > state.second_candle and _confirm_reversal(asset, current, state):
+                fire_signal(asset, opening, indicator)
+            elif state.confirm_deadline and int(broker_clock.now_ts()) > state.confirm_deadline:
+                gsr_memory.reset(asset)
 
         proximity_engine.update(asset, state, indicator)
 

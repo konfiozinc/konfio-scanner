@@ -1,7 +1,7 @@
 # APPALÍ SCANNER — Entrega técnica
 
 Scanner GSR M1 conectado directamente a **IQ Option como única fuente de verdad**.
-Proyecto: `KONFIO_ZINC\SCANNER\app_ali.py`.
+Proyecto: `BOT\SCANNER\app_ali.py`.
 
 ## Requisitos
 - Windows + Python 3.11 (entorno `venv311` ya preparado en esta carpeta).
@@ -10,7 +10,7 @@ Proyecto: `KONFIO_ZINC\SCANNER\app_ali.py`.
 
 ## Comando exacto para ejecutar
 ```powershell
-cd C:\Users\usuario29\Documents\KONFIO_ZINC\SCANNER
+cd C:\Users\usuario29\Documents\BOT\SCANNER
 venv311\Scripts\python.exe app_ali.py
 ```
 O doble clic en `run_scanner.bat` (usa `venv311` y abre http://localhost:8000).

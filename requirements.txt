@@ -1,29 +1,37 @@
 # ============================================================
 # AppALI GSR Scanner - dependencias
 # ============================================================
-# Probadas y en uso en el venv actual de esta carpeta (Python 3.14).
-# NOTA: las versiones antiguas (numpy==1.26.4, pandas==2.2.1) NO tienen
-# ruedas para Python 3.14 y hacian fallar una instalacion limpia.
+# DOS ENTORNOS (elige run_scanner.bat):
+#   venv311  = Python 3.11  ->  MODO REAL con IQ Option  (PRODUCCION)
+#   venv     = Python 3.14  ->  MODO SIMULACION (sin broker)
+#
+# run_scanner.bat usa venv311 en primer lugar (modo REAL).
+# Para el modo REAL se necesita la libreria clasica iqoptionapi
+# (expone  from iqoptionapi.stable_api import IQ_Option).
+# Ya esta instalada en venv311; se instala desde GitHub y requiere
+# Python <= 3.11:  https://github.com/iqoptionapi/iqoptionapi
 
-fastapi==0.141.1
-uvicorn==0.52.4
-numpy==2.5.2
-pandas==3.0.5
+# ------------------------------------------------------------
+# venv311 (Python 3.11, MODO REAL) - versiones verificadas en uso
+# ------------------------------------------------------------
+fastapi==0.110.0
+uvicorn==0.28.0
+numpy==1.26.4
+pandas==2.2.1
 ta==0.11.0
+websockets==17.1
+requests==2.34.2
+# iqoptionapi classico (versiones 7.x) - NO via pip; instalar desde GitHub
 
 # ------------------------------------------------------------
-# Conexion REAL con IQ Option (OPCIONAL - NO instalar por ahora)
+# venv (Python 3.14, MODO SIMULACION) - solo si NO existe venv311
 # ------------------------------------------------------------
-# El paquete de PyPI "iqoptionapi==0.5" es OTRA libreria distinta:
-# no trae "iqoptionapi.stable_api", depende de "requests" (ausente)
-# y NO es compatible con app_ali.py.
-#
-# app_ali.py espera la libreria clasica que expone:
-#     from iqoptionapi.stable_api import IQ_Option
-# (metodos: connect, change_balance, get_server_timestamp,
-#  check_connect, get_candles)
-#
-# Esa libreria clasica (github: iqoptionapi/iqoptionapi) suele requerir
-# Python <= 3.11. Si se desea el modo real del broker, crear un venv con
-# Python 3.11 (venv311) e instalarla desde GitHub. Sin ella, la app corre
-# en SIMULACION (la interfaz web funciona igual).
+# Para Python 3.14 las versiones antiguas (numpy==1.26.4, pandas==2.2.1)
+# NO tienen ruedas y hacian fallar una instalacion limpia; por eso el venv
+# de 3.14 usa las versiones nuevas:
+#   fastapi==0.141.1
+#   uvicorn==0.52.4
+#   numpy==2.5.2
+#   pandas==3.0.5
+# Nota: sin la libreria iqoptionapi el escaner corre en SIMULACION (la
+# interfaz web funciona igual, pero NO consulta al broker real).
