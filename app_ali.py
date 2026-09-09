@@ -1488,6 +1488,22 @@ class IQClient:
             except Exception as e:
                 log.warning(f"⚠️ Error obteniendo server timestamp de IQ Option: {e}")
 
+    def rebuild(self):
+        """Renueva la sesión IQ desde cero. Útil cuando get_all_init_v2 deja de
+        responder aunque el socket parezca 'vivo' (fallo conocido de la librería
+        en sesiones largas). No debe llamarse con streams en mitad de ciclo."""
+        try:
+            if self.api is not None:
+                try:
+                    self.api.disconnect()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.api = None
+        self.connected = False
+        return self.connect()
+
     def is_connected(self):
         if self.api:
             try:
@@ -1664,6 +1680,7 @@ class BrokerMarketState:
         self.assets = {}             # nombre -> {'id','type','open','suspended','source'}
         self.updated_at = 0
         self.last_error = ""
+        self.fail_count = 0          # refrescos fallidos consecutivos
         # Tolerancia: si un refresco del catálogo falla de forma transitoria
         # (STALE), seguimos usando el último snapshot conocido durante esta
         # ventana en lugar de cerrar TODO el mercado.
@@ -1740,6 +1757,7 @@ class BrokerMarketState:
             self.status = "LIVE"
             self.updated_at = int(time.time())
             self.last_error = ""
+            self.fail_count = 0
         abiertos = sum(1 for a in parsed.values() if a.get("open"))
         log.info(f"[BROKER] Disponibilidad LIVE: {len(parsed)} instrumentos ({abiertos} abiertos)")
 
@@ -1747,7 +1765,18 @@ class BrokerMarketState:
         with self.lock:
             self.status = "STALE" if self.assets else "UNKNOWN"
             self.last_error = msg
+            self.fail_count = getattr(self, "fail_count", 0) + 1
         log.warning(f"[BROKER] Disponibilidad {self.status}: {msg}")
+        # Si el catálogo falla muchas veces seguidas, la sesión de la librería
+        # quedó degradada (get_all_init_v2 deja de responder): renovar la sesión.
+        if self.fail_count >= 3:
+            with self.lock:
+                self.fail_count = 0
+            log.warning("[BROKER] Catálogo fallando repetidamente → renovando sesión IQ...")
+            try:
+                threading.Thread(target=_recover_iq_session, daemon=True).start()
+            except Exception:
+                pass
 
     def get(self, asset):
         with self.lock:
@@ -1770,6 +1799,25 @@ class BrokerMarketState:
             return False
 
 broker_market = BrokerMarketState()
+
+
+def _recover_iq_session():
+    """Renueva la sesión IQ cuando el catálogo (get_all_init_v2) falla varias
+    veces seguidas (sesión degradada). Serializada con CONN_LOCK para no
+    reconectar dos veces a la vez."""
+    if not CONN_LOCK.acquire(blocking=False):
+        return
+    try:
+        log.info("[RECOVER] Renovando sesión IQ (reconexión completa)...")
+        if iq.rebuild():
+            log.info("[RECOVER] Sesión renovada. Refrescando catálogo...")
+            broker_market.refresh()
+        else:
+            log.warning("[RECOVER] No se pudo renovar la sesión (se reintentará).")
+    except Exception as e:
+        log.error(f"[RECOVER] error: {e}")
+    finally:
+        CONN_LOCK.release()
 
 
 def _fmt_ultima_vela(asset):
