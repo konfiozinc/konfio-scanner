@@ -466,9 +466,9 @@ FX_CURRENCIES = {
 }
 
 # --- Lista curada: pares MÁS COMUNES (por liquidez/uso) ---
-# Se priorizan estos pares para no saturar con 80+ instrumentos: cada par puede
-# aparecer como REAL (-OP) y OTC (-OTC), ~50 activos en total. Ordenados por
-# relevancia; los primeros tienen prioridad si hay que recortar.
+# Solo los más operados (~40 activos entre REAL -OP y OTC). Se retiraron los
+# menos usados (PLN, PHP, CLP, THB, HKD, SGD y cruces menores GBP/NZD, NZD/CAD,
+# NZD/CHF, GBP/CAD). Ordenados por relevancia; prioridad si hay que recortar.
 COMMON_PAIR_RANK = {code: i for i, code in enumerate([
     # 1) Pares mayores (los más operados)
     "EURUSD", "USDJPY", "GBPUSD", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
@@ -477,11 +477,9 @@ COMMON_PAIR_RANK = {code: i for i, code in enumerate([
     # 3) Cruces principales
     "EURJPY", "EURGBP", "GBPJPY", "EURCHF", "AUDJPY", "EURAUD", "EURCAD",
     "GBPCHF", "CADJPY", "CHFJPY", "AUDCAD", "AUDNZD", "NZDJPY", "EURNZD",
-    "GBPAUD", "GBPCAD", "GBPNZD", "NZDCAD", "NZDCHF",
-    # 4) Otros líquidos (Asia/EM)
-    "USDSGD", "USDHKD", "USDTHB", "USDCLP", "USDPHP", "USDPLN",
+    "GBPAUD",
 ])}
-MAX_UNIVERSE = 50   # tope de activos monitoreados (~50 más comunes)
+MAX_UNIVERSE = 40   # tope de activos monitoreados (~40 más comunes)
 
 # Exclusiones explícitas de la variante REAL (-OP) que en la app de IQ Option
 # NO se puede operar a 1 minuto (aunque el catálogo las liste con 60 s):
@@ -810,11 +808,16 @@ def _trend_ok(close) -> bool:
     return abs(sep) / sd < TREND_FILTER_Z
 
 
-def calculate_indicators(candles) -> IndicatorSnapshot:
-    # P2: trabajar SOLO con velas cerradas (descartar la vela aún en formación,
-    # candles[-1]) para que BB/RSI/DAMOA y el body-outside apunten al MISMO cierre.
-    closed = candles[:-1]
-    close = np.array([x.close for x in closed], dtype=float)
+def calculate_indicators(candles, include_forming: bool = False) -> IndicatorSnapshot:
+    # P2: por defecto se trabaja SOLO con velas cerradas (se descarta la vela en
+    # formación, candles[-1]) para que BB/RSI/DAMOA y el body-outside apunten al
+    # MISMO cierre (sin look-ahead en las señales).
+    # include_forming=True es SOLO para el tablero en vivo: incluye la vela que
+    # se está formando para que los valores se muevan en tiempo real (display).
+    data = candles if include_forming else candles[:-1]
+    if len(data) < 30:
+        return None
+    close = np.array([x.close for x in data], dtype=float)
 
     bb = ta.volatility.BollingerBands(pd.Series(close), window=20, window_dev=2)
     upper = bb.bollinger_hband().iloc[-1]
@@ -834,15 +837,15 @@ def calculate_indicators(candles) -> IndicatorSnapshot:
     damoa_serie = ((df_close - ema) / vol_piso) * 10
     damoa_val = float(np.clip(damoa_serie.fillna(0.0).iloc[-1], -DAMOA_CLAMP, DAMOA_CLAMP))
 
-    indicator = IndicatorSnapshot(index=len(closed)-1)
+    indicator = IndicatorSnapshot(index=len(data)-1)
     indicator.bb_upper = upper
     indicator.bb_middle = middle
     indicator.bb_lower = lower
     indicator.rsi = rsi_val
     indicator.damoa = damoa_val
-    indicator.trend_ok = _trend_ok(close)
+    indicator.trend_ok = True if include_forming else _trend_ok(close)
 
-    current_candle = closed[-1]
+    current_candle = data[-1]
     indicator.body = abs(current_candle.close - current_candle.open)
     indicator.outside = body_outside_percent(current_candle, indicator)
     return indicator
@@ -1854,6 +1857,15 @@ class ScanController:
 
         current_minute = int(now_ts) // 60
         if current_minute == self.last_processed_minute:
+            # TABLERO EN VIVO: aunque no haya vela nueva, refrescar el %/valores
+            # cada ~4 s con la vela que se está formando (solo visual, no afecta
+            # a las señales, que solo se disparan con velas CERRADAS).
+            if now_ts - getattr(self, "_last_live_refresh", 0) >= 4:
+                self._last_live_refresh = now_ts
+                try:
+                    self.refresh_proximity_live()
+                except Exception as e:
+                    log.debug(f"[LIVE] error refresco en vivo: {e}")
             return
 
         start = time.perf_counter()
@@ -1867,6 +1879,26 @@ class ScanController:
         self.scan_time = round(time.perf_counter() - start, 3)
 
         log.info(f"[SCANNER] Ciclo #{self.cycles} completado en {self.scan_time}s | Activos vivos: {len(market_feed.active_assets())}")
+
+    def refresh_proximity_live(self):
+        """Refresco SOLO visual del tablero: recalcula los indicadores con la vela
+        que se está formando (realtime) cada ~4 s para que los porcentajes no se
+        vean 'tarde'. NO toca la máquina de estados ni dispara señales (esas solo
+        usan velas CERRADAS en el pipeline)."""
+        if not candle_streams.active_count():
+            return
+        for asset in asset_manager.all_tradable():
+            candles = candle_streams.get_realtime(asset)
+            if not candles or len(candles) < 30:
+                continue
+            try:
+                live = calculate_indicators(candles, include_forming=True)
+            except Exception:
+                continue
+            if live is None:
+                continue
+            state = gsr_memory.get(asset)
+            proximity_engine.update(asset, state, live)
 
     def loop(self):
         self.running = True
