@@ -43,7 +43,8 @@ import uvicorn
 APP_NAME = "AppALÍ"
 VERSION = "7.5-PROD"
 HOST = "0.0.0.0"
-PORT = 8000
+PORT = int(os.environ.get("PORT", "8000"))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Carga de credenciales desde un archivo .env LOCAL (ignorado por git).
 # Las credenciales NO van hardcodeadas en el código: se leen del entorno o del
@@ -56,18 +57,40 @@ except Exception:
 
 IQ_EMAIL = os.environ.get("IQ_EMAIL", "")
 IQ_PASSWORD = os.environ.get("IQ_PASSWORD", "")
-IQ_MODE = os.environ.get("IQ_ACCOUNT_TYPE", "PRACTICE")
+# OJO: si el modo no es exactamente REAL/PRACTICE/TOURNAMENT la librería ejecuta
+# exit(1) dentro de change_balance(), y SystemExit NO lo captura 'except
+# Exception': el escáner se cerraba sin más. Se normaliza aquí.
+IQ_MODE = str(os.environ.get("IQ_ACCOUNT_TYPE", "PRACTICE")).strip().upper()
+if IQ_MODE not in ("REAL", "PRACTICE", "TOURNAMENT"):
+    IQ_MODE = "PRACTICE"
 
-# Puente local de WhatsApp (publica las señales en el grupo de la comunidad).
-# Proyecto: whatsapp_bridge/  |  Endpoint HTTP del puente.
-WHATSAPP_BRIDGE_URL = os.environ.get("WHATSAPP_BRIDGE_URL", "http://127.0.0.1:8120")
-WHATSAPP_BRIDGE_ENABLED = os.environ.get("WHATSAPP_BRIDGE_ENABLED", "1") == "1"
+# --- Control de acceso al panel y al WebSocket ---
+# El servidor escucha en 0.0.0.0: sin token, CUALQUIERA en la misma red puede
+# abrir http://<tu-ip>:8000/ y ver las señales. Con el token puesto, las
+# peticiones que no lo traigan se rechazan (WebSocket 4401 / HTTP 401).
+# Las peticiones desde el propio equipo (127.0.0.1 / ::1) se permiten siempre,
+# para que no puedas quedarte fuera de tu propio panel por olvidar el token.
+#     WS_AUTH_TOKEN=<cadena larga aleatoria>   (en .env o en el entorno)
+WS_AUTH_TOKEN = os.environ.get("WS_AUTH_TOKEN", "").strip()
 
-# Publicación automática de señales en la app Alí Binary Options (Firebase).
-# APP_SIGNAL_URL = URL de la Cloud Function 'postSignal'. Si está vacío, NO se
-# publica (desactivado por defecto hasta desplegar la función).
-APP_SIGNAL_URL = os.environ.get("APP_SIGNAL_URL", "")
-APP_SIGNAL_SECRET = os.environ.get("APP_SIGNAL_SECRET", "CAMBIA_ESTE_SECRETO")
+# Tope del historial de patrones ya disparados (evita crecimiento sin límite en
+# ejecuciones largas). Al superarlo se descartan los más antiguos: un patrón sólo
+# se consulta en los minutos siguientes a formarse, así que podar lo viejo no
+# puede provocar señales repetidas.
+PATTERN_HISTORY_MAX = int(os.environ.get("PATTERN_HISTORY_MAX", "5000"))
+
+# ==========================================================
+# PUBLICACIÓN DE SEÑALES EN ALÍ BINARY OPTIONS
+# ==========================================================
+# Dos vías, ambas desactivadas hasta que se configuren (ver .env.example):
+#   Opción A (recomendada) - Cloud Function 'postSignal':
+#       APP_SIGNAL_URL + APP_SIGNAL_SECRET. El escáner hace POST y la función
+#       escribe en Firestore. La service account NO vive en el escáner.
+#   Opción B - escritura directa en Firestore con service account:
+#       FIREBASE_SA_PATH + FIREBASE_PROJECT_ID.
+# (La publicación se hace directamente en la app Alí Binary Options.)
+APP_SIGNAL_URL = os.environ.get("APP_SIGNAL_URL", "").strip()
+APP_SIGNAL_SECRET = os.environ.get("APP_SIGNAL_SECRET", "")
 
 # Opción B (sin Cloud Functions): el scanner escribe directo en Firestore con
 # una service account key. FIREBASE_SA_PATH = ruta al JSON de la clave.
@@ -88,6 +111,31 @@ DAMOA_PERIOD = 5
 DAMOA_HIGH = 10
 DAMOA_LOW = -10
 BODY_OUTSIDE = 40.0
+
+# --- Umbral de ruptura del cuerpo fuera de banda, SEPARADO por tipo de activo ---
+# Por defecto los dos valen 40.0, es decir el valor calibrado de la estrategia:
+# este cambio NO altera la operativa tal como está. Se puede endurecer el OTC
+# (mercado sintético, más falsos positivos) sin tocar el código:
+#     set BODY_OUTSIDE_OTC=55      -> endurecer sólo OTC
+#     set BODY_OUTSIDE_REAL=45     -> endurecer sólo REAL
+BODY_OUTSIDE_REAL = float(os.environ.get("BODY_OUTSIDE_REAL", str(BODY_OUTSIDE)))
+BODY_OUTSIDE_OTC = float(os.environ.get("BODY_OUTSIDE_OTC", str(BODY_OUTSIDE)))
+
+# --- Filtro de volumen (OPCIONAL, desactivado por defecto) ---
+# Medido sobre 1,6 M de velas M1 reales exportadas (exportar_velas.py):
+#   REAL (-OP): el volumen ES REAL (todas las velas > 0; p. ej. AUDCAD-OP media
+#               ~356, rango 125-2295). Aquí el filtro SÍ es viable.
+#   OTC:        el volumen es 0 en TODAS las velas (24/24 activos).
+# Por eso el filtro viene desactivado y, además, se auto-desactiva cuando detecta
+# que el activo no publica volumen (los OTC) en lugar de bloquear sus señales.
+VOLUME_FILTER_ENABLED = os.environ.get("VOLUME_FILTER_ENABLED", "0") == "1"
+VOLUME_LOOKBACK = 20
+VOLUME_MIN_REL = float(os.environ.get("VOLUME_MIN_REL", "1.0"))
+
+# Umbral de referencia "estricto" para OTC: NO filtra nada, sólo sirve para que
+# cada señal OTC quede registrada diciendo si ese umbral más exigente la habría
+# descartado. Así se decide con datos si conviene activar BODY_OUTSIDE_OTC=55.
+OTC_STRICT_REFERENCE = float(os.environ.get("OTC_STRICT_REFERENCE", "55"))
 
 # --- Mejoras P1 / P3 / P4 / P5 ---
 # P1: piso de volatilidad y límite para DAMOA (evita que explote a miles en mercado plano).
@@ -121,7 +169,7 @@ LIVE_WINDOW_OTC = 180    # OTC: tolerancia por menor frecuencia / rollovers
 FX_FRIDAY_CLOSE_HOUR = 21
 FX_SUNDAY_OPEN_HOUR = 21
 
-AUDIT_FILE = "signals_audit.csv"
+AUDIT_FILE = os.path.join(BASE_DIR, "signals_audit.csv")
 
 # ==========================================================
 # FORMATEADOR DE NOMBRES DE ACTIVOS (IQ OPTION STYLE)
@@ -185,6 +233,46 @@ logging.basicConfig(
 )
 log = logging.getLogger(APP_NAME)
 
+# Bitácora rotativa a archivo: la consola se pierde al cerrar la ventana (y en
+# Windows se recorta al llegar al límite de líneas), así que sin esto no queda
+# rastro de lo ocurrido cuando algo falla por la noche. Se engancha al logger
+# RAÍZ para que también capture los mensajes de la librería y de uvicorn.
+LOG_FILE = os.path.join(BASE_DIR, "scanner.log")
+LOG_MAX_BYTES = int(os.environ.get("LOG_MAX_BYTES", str(10 * 1024 * 1024)))
+LOG_BACKUPS = int(os.environ.get("LOG_BACKUPS", "5"))
+# APPALI_NO_FILE_LOG=1 desactiva la bitácora a archivo: lo usan los tests para no
+# mezclar sus señales simuladas con las reales en scanner.log.
+if os.environ.get("APPALI_NO_FILE_LOG") == "1":
+    log.info("[LOG] Bitácora a archivo desactivada (APPALI_NO_FILE_LOG=1).")
+else:
+    try:
+        from logging.handlers import RotatingFileHandler
+        _file_handler = RotatingFileHandler(
+            LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8")
+        _file_handler.setFormatter(logging.Formatter(
+            "[%(asctime)s] %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+        _file_handler.setLevel(logging.INFO)
+        logging.getLogger().addHandler(_file_handler)
+        log.info(f"[LOG] Bitácora rotativa activa: {LOG_FILE} "
+                 f"({LOG_MAX_BYTES // (1024 * 1024)} MB x {LOG_BACKUPS} copias)")
+    except Exception as _log_err:            # nunca debe impedir que arranque
+        log.warning(f"[LOG] No se pudo activar la bitácora a archivo: {_log_err}")
+
+# ==========================================================
+# ESTADO DE LA PUBLICACIÓN EN ALÍ BINARY OPTIONS (aviso del panel)
+# ==========================================================
+# El estado se deduce de la configuración (no hay proceso externo que sondear):
+# aquí el estado se deduce de la configuración: si hay URL de Cloud Function o
+# service account, las señales se publican; si no, no salen del escáner.
+def _estado_app() -> dict:
+    if APP_SIGNAL_URL:
+        return {"state": "ON", "detail": f"Cloud Function: {APP_SIGNAL_URL}"}
+    if FIREBASE_SA_PATH:
+        return {"state": "ON", "detail": f"Firestore directo: {FIREBASE_PROJECT_ID}"}
+    return {"state": "OFF",
+            "detail": "sin APP_SIGNAL_URL ni FIREBASE_SA_PATH: las señales sólo "
+                      "quedan en el log y en signals_audit.csv"}
+
 try:
     from iqoptionapi.stable_api import IQ_Option
     IQ_AVAILABLE = True
@@ -195,6 +283,327 @@ except Exception:
     except Exception:
         IQ_AVAILABLE = False
         log.warning("⚠️ Módulo iqoptionapi ausente en el entorno local. Ejecutando en simulación.")
+
+# ==========================================================
+# BLINDAJE DE LA LIBRERÍA iqoptionapi (parches en tiempo de ejecución)
+# ==========================================================
+# La librería clásica (7.x) espera los mensajes del websocket con bucles SIN
+# timeout y SIN sleep, por ejemplo:
+#
+#   get_candles()        ->  while self.check_connect and candles_data == None: pass
+#   get_all_init_v2()    ->  while ... == None:  (gira 30 s al 100% de CPU)
+#   connect()            ->  while global_value.balance_id == None: pass
+#   get_profile_ansyc()  ->  while self.api.profile.msg == None: pass
+#
+# Si el socket deja de responder, esos bucles NO TERMINAN NUNCA. Cada llamada
+# deja un hilo girando al 100% de CPU para siempre; al agotarse los 5 hilos del
+# pool TODAS las lecturas de velas empiezan a expirar y los 40 activos pasan a
+# NO_DATA de forma permanente (es exactamente el fallo de scanner_run_err.log:
+# "-> NO_DATA" en todos los activos y "Ciclo completado en 0.0s" sin fin).
+#
+# Estos parches los sustituyen por esperas con timeout que ceden CPU. Son el
+# arreglo de raíz: sin esto ningún reintento posterior recupera el escáner.
+IQ_CANDLE_TIMEOUT = float(os.environ.get("IQ_CANDLE_TIMEOUT", "8"))
+IQ_INIT_TIMEOUT = float(os.environ.get("IQ_INIT_TIMEOUT", "35"))
+IQ_STREAM_TIMEOUT = float(os.environ.get("IQ_STREAM_TIMEOUT", "5"))
+IQ_PROFILE_TIMEOUT = float(os.environ.get("IQ_PROFILE_TIMEOUT", "15"))
+IQ_CONNECT_TIMEOUT = float(os.environ.get("IQ_CONNECT_TIMEOUT", "60"))
+
+# Vigilancia del bucle del escáner. El bucle NO debe hacer nunca trabajo de red:
+# si lo hace, se queda bloqueado y el panel se congela ("se detiene solo").
+STALL_WARN = float(os.environ.get("STALL_WARN", "120"))      # avisar si el latido se atrasa
+STALL_RECOVER = float(os.environ.get("STALL_RECOVER", "300"))  # renovar sesión si persiste
+HEARTBEAT_LOG = float(os.environ.get("HEARTBEAT_LOG", "300"))  # latido informativo
+
+# Cuenta cuántos hilos se han quedado abandonados girando dentro de la librería.
+# Si se supera el tope se deja de reconectar: preferimos un escáner detenido y
+# avisando, antes que una máquina al 100% de CPU sin poder recuperarse.
+IQ_ABANDONED_CALLS = 0
+IQ_ABANDONED_MAX = 3
+IQ_ABANDONED_LOCK = threading.Lock()
+
+# La librería guarda la respuesta de velas en UN ÚNICO campo compartido
+# (api.candles.candles_data): si dos hilos piden velas a la vez, se pisan la
+# respuesta. Este candado serializa las peticiones de velas (histórico y
+# stream) para que cada una reciba su propia respuesta.
+IQ_CANDLES_LOCK = threading.Lock()
+
+
+def _harden_iqoptionapi() -> bool:
+    """Sustituye los bucles infinitos de la librería por versiones con timeout."""
+    if not IQ_AVAILABLE:
+        return False
+    try:
+        import iqoptionapi.constants as _iq_const
+        import iqoptionapi.global_value as _iq_global
+    except Exception as exc:
+        log.warning(f"No se pudo blindar iqoptionapi: {exc}")
+        return False
+
+    def _safe_get_candles(self, ACTIVES, interval, count, endtime, _timeout=None):
+        timeout = IQ_CANDLE_TIMEOUT if _timeout is None else float(_timeout)
+        # Serializado: api.candles.candles_data es un ÚNICO campo compartido;
+        # dos peticiones simultáneas se pisarían la respuesta entre sí.
+        with IQ_CANDLES_LOCK:
+            try:
+                self.api.candles.candles_data = None
+            except Exception:
+                return None
+            try:
+                if ACTIVES not in _iq_const.ACTIVES:
+                    log.debug(f"[LIB] {ACTIVES} no está en consts.ACTIVES")
+                    return None
+                try:
+                    endtime = int(endtime)
+                except Exception:
+                    endtime = int(time.time())
+                self.api.getcandles(_iq_const.ACTIVES[ACTIVES], interval, count, endtime)
+            except Exception as exc:
+                log.debug(f"[LIB] getcandles({ACTIVES}) falló: {exc}")
+                return None
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    data = self.api.candles.candles_data
+                except Exception:
+                    data = None
+                if data is not None:
+                    return data
+                time.sleep(0.05)          # cede CPU (antes: 'pass' al 100% de CPU)
+        log.warning(f"[LIB] timeout de {timeout:.0f}s esperando velas de {ACTIVES}")
+        return None
+
+    def _safe_get_all_init_v2(self):
+        try:
+            self.api.api_option_init_all_result_v2 = None
+        except Exception:
+            return None
+        try:
+            self.api.get_api_option_init_all_v2()
+        except Exception as exc:
+            log.debug(f"[LIB] get_api_option_init_all_v2 falló: {exc}")
+            return None
+        start_t = time.time()
+        while time.time() - start_t < IQ_INIT_TIMEOUT:
+            try:
+                if self.api.api_option_init_all_result_v2 is not None:
+                    return self.api.api_option_init_all_result_v2
+            except Exception:
+                pass
+            time.sleep(0.1)           # cede CPU (antes: bucle vacío 30 s)
+        log.warning(f"[LIB] get_all_init_v2 sin respuesta en {IQ_INIT_TIMEOUT:.0f}s")
+        return None
+
+    def _safe_get_profile_ansyc(self, _timeout=None):
+        timeout = IQ_PROFILE_TIMEOUT if _timeout is None else float(_timeout)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                if self.api.profile.msg is not None:
+                    return self.api.profile.msg
+            except Exception:
+                return None
+            time.sleep(0.05)          # cede CPU
+        log.warning(f"[LIB] get_profile_ansyc sin respuesta en {timeout:.0f}s")
+        return None
+
+    def _safe_full_realtime_get_candle(self, ACTIVE, size, maxdict):
+        candles = _safe_get_candles(self, ACTIVE, size, maxdict, int(time.time()))
+        if not candles:
+            return
+        for can in candles:
+            try:
+                if "from" in can:
+                    self.api.real_time_candles[str(ACTIVE)][int(size)][can["from"]] = can
+            except Exception:
+                continue
+
+    def _safe_start_candles_one_stream(self, ACTIVE, size):
+        key = str(ACTIVE) + "," + str(size)
+        if key not in self.subscribe_candle:
+            self.subscribe_candle.append(key)
+        try:
+            self.api.candle_generated_check[str(ACTIVE)][int(size)] = {}
+        except Exception:
+            pass
+        start = time.time()
+        while time.time() - start <= IQ_STREAM_TIMEOUT:
+            try:
+                if self.api.candle_generated_check[str(ACTIVE)][int(size)] == True:
+                    return True
+            except Exception:
+                pass
+            try:
+                self.api.subscribe(_iq_const.ACTIVES[ACTIVE], size)
+            except Exception as exc:
+                log.debug(f"[LIB] subscribe({ACTIVE}) falló: {exc}")
+                return False
+            time.sleep(1)
+        log.warning(f"[LIB] stream no confirmado en {IQ_STREAM_TIMEOUT:.0f}s: {ACTIVE}")
+        return False
+
+    def _safe_start_candles_stream(self, ACTIVE, size, maxdict):
+        try:
+            if size == "all":
+                for s in self.size:
+                    _safe_full_realtime_get_candle(self, ACTIVE, s, maxdict)
+                    self.api.real_time_candles_maxdict_table[ACTIVE][s] = maxdict
+                return _safe_start_candles_one_stream(self, ACTIVE, 60)
+            if size not in self.size:
+                log.error(f"[LIB] size inválido en start_candles_stream: {size}")
+                return False
+            self.api.real_time_candles_maxdict_table[ACTIVE][size] = maxdict
+            _safe_full_realtime_get_candle(self, ACTIVE, size, maxdict)
+            return _safe_start_candles_one_stream(self, ACTIVE, size)
+        except Exception as exc:
+            log.debug(f"[LIB] start_candles_stream({ACTIVE}) falló: {exc}")
+            return False
+
+    def _no_resubscribe(self):
+        """El escáner es el único dueño de las suscripciones (CandleStreamManager):
+        la librería NO debe re-suscribir de forma síncrona dentro de connect()
+        (bloqueaba hasta 20 s por activo y congelaba la reconexión)."""
+        self.subscribe_candle = []
+
+    try:
+        IQ_Option.get_candles = _safe_get_candles
+        IQ_Option.get_all_init_v2 = _safe_get_all_init_v2
+        IQ_Option.get_profile_ansyc = _safe_get_profile_ansyc
+        IQ_Option.full_realtime_get_candle = _safe_full_realtime_get_candle
+        IQ_Option.start_candles_one_stream = _safe_start_candles_one_stream
+        IQ_Option.start_candles_stream = _safe_start_candles_stream
+        IQ_Option.re_subscribe_stream = _no_resubscribe
+    except Exception as exc:
+        log.error(f"No se pudieron aplicar los parches a iqoptionapi: {exc}")
+        return False
+
+    # connect() espera 'balance_id' con un bucle vacío infinito. Se deja un
+    # marcador no-None para que no pueda colgarse; change_balance() lo
+    # sustituye por el id real en cuanto llega el perfil.
+    try:
+        if getattr(_iq_global, "balance_id", None) is None:
+            _iq_global.balance_id = 0
+    except Exception:
+        pass
+    return True
+
+
+IQ_LIB_HARDENED = _harden_iqoptionapi()
+
+
+def _patch_ws_callbacks() -> bool:
+    """Compatibilidad de iqoptionapi con websocket-client 1.x.
+
+    iqoptionapi se escribió para websocket-client 0.56. En 0.56, si el callback
+    era un MÉTODO ligado se invocaba sólo con el mensaje; en 1.x se invoca
+    SIEMPRE como callback(app_ws, *args). Consecuencias reales observadas:
+
+      - on_message(self, message) recibía (ws, data) -> TypeError en CADA
+        mensaje. El socket conectaba ("Websocket connected") pero no procesaba
+        ni un solo mensaje: sin velas, sin catálogo y sin balance. El panel
+        mostraba todo en CLOSED y el escáner parecía 'conectado pero vacío'.
+      - on_close(wss) recibía (ws, code, reason) -> TypeError al cerrar, con lo
+        que check_websocket_if_connect se quedaba en 1 y el escáner creía seguir
+        conectado con el socket ya muerto.
+
+    Se envuelven los cuatro callbacks para aceptar ambas convenciones."""
+    try:
+        from iqoptionapi.ws.client import WebsocketClient as _WSC
+        from websocket import WebSocketApp as _WSA
+    except Exception as exc:
+        log.warning(f"No se pudieron ajustar los callbacks del websocket: {exc}")
+        return False
+    if getattr(_WSC, "_appali_ws_patched", False):
+        return True
+
+    import inspect
+
+    def _tolerant(name):
+        raw = _WSC.__dict__.get(name)
+        original = getattr(_WSC, name)
+        # Las dos convenciones de la librería:
+        #  - on_message es un MÉTODO normal: se recibe ligado, así que con
+        #    websocket-client 1.x llega un argumento extra (la instancia de
+        #    WebSocketApp) que hay que descartar.
+        #  - on_open / on_error / on_close son @staticmethod: reciben el socket
+        #    como primer argumento LEGÍTIMO, igual que en 0.56. Aquí no se
+        #    descarta nada; sólo se recortan argumentos añadidos después
+        #    (1.x llama on_close(ws, code, reason) y la firma espera 1).
+        is_static = isinstance(raw, staticmethod)
+        try:
+            params = [p for p in inspect.signature(original).parameters.values()
+                      if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+            max_args = len(params)
+        except (TypeError, ValueError):
+            max_args = None
+
+        def wrapper(*args, **kwargs):
+            if not is_static:
+                for idx in (1, 0):
+                    if len(args) > idx and isinstance(args[idx], _WSA):
+                        args = args[:idx] + args[idx + 1:]
+                        break
+            if max_args is not None and len(args) > max_args:
+                args = args[:max_args]
+            return original(*args, **kwargs)
+
+        wrapper.__name__ = name
+        setattr(_WSC, name, staticmethod(wrapper) if is_static else wrapper)
+
+    for _name in ("on_message", "on_close", "on_open", "on_error"):
+        try:
+            _tolerant(_name)
+        except Exception as exc:
+            log.debug(f"No se pudo envolver {_name}: {exc}")
+    _WSC._appali_ws_patched = True
+    return True
+
+
+IQ_WS_PATCHED = _patch_ws_callbacks()
+
+# La librería clásica deja el logger 'websocket' en DEBUG: eso inunda la consola
+# con cada trama enviada y recibida. Se sube a WARNING (WEBSOCKET_DEBUG=1 para
+# volver a verlo).
+_ws_logger = logging.getLogger("websocket")
+if os.environ.get("WEBSOCKET_DEBUG") == "1":
+    _ws_logger.setLevel(logging.DEBUG)
+else:
+    _ws_logger.setLevel(logging.WARNING)
+
+if IQ_AVAILABLE and IQ_LIB_HARDENED:
+    log.info("[LIB] iqoptionapi blindada: esperas con timeout activadas.")
+if IQ_WS_PATCHED:
+    log.info("[LIB] callbacks del websocket adaptados a websocket-client 1.x.")
+
+
+def call_with_timeout(fn, timeout, *args, **kwargs):
+    """Ejecuta una llamada bloqueante de la librería en un hilo daemon con
+    límite de tiempo. Si expira, el hilo se abandona (no se puede matar en
+    Python) pero queda contabilizado: si se acumulan demasiados, el escáner
+    deja de reconectar en vez de degradar la máquina entera."""
+    global IQ_ABANDONED_CALLS
+    box = {}
+
+    def _runner():
+        try:
+            box["result"] = fn(*args, **kwargs)
+        except BaseException as exc:      # incluye SystemExit de la librería
+            box["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True,
+                              name=f"iqcall-{getattr(fn, '__name__', 'call')}")
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        with IQ_ABANDONED_LOCK:
+            IQ_ABANDONED_CALLS += 1
+            abandoned = IQ_ABANDONED_CALLS
+        log.error(f"[LIB] '{getattr(fn, '__name__', 'call')}' excedió {timeout}s "
+                  f"y quedó colgada (llamadas colgadas: {abandoned})")
+        raise TimeoutError(f"{getattr(fn, '__name__', 'call')} excedió {timeout}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
 
 # ==========================================================
 # ZONAS HORARIAS Y MOTOR DE TIEMPO CENTRALIZADO (BROKER CLOCK)
@@ -209,6 +618,21 @@ class ClockStatus(Enum):
     DESYNCED = "DESYNCED"
     LOCAL_FALLBACK = "LOCAL_FALLBACK"
 
+# Desfase máximo aceptable entre el reloj del broker y el del equipo. El reloj
+# local está sincronizado por NTP y las velas de IQ Option vienen en epoch UTC,
+# así que un desfase mayor que esto NO es real: significa que la librería nos
+# está dando un 'timesync' viejo (su hilo lector se quedó atrás). Aceptarlo
+# envenenaba todas las edades de vela y con ellas el filtro de activos vivos.
+CLOCK_MAX_SKEW = float(os.environ.get("CLOCK_MAX_SKEW", "30"))
+CLOCK_SANE_EPOCH_MIN = 1_600_000_000   # 2020-09-13
+CLOCK_SANE_EPOCH_MAX = 2_200_000_000   # 2039-09-07
+# Cada cuánto se resincroniza el reloj del broker y con cuántas muestras.
+# Dos muestras separadas 0,3 s reducen el ruido de latencia de red (medido:
+# +1,058 s y +0,758 s en dos lecturas seguidas del mismo instante).
+CLOCK_SYNC_INTERVAL = float(os.environ.get("CLOCK_SYNC_INTERVAL", "30"))
+CLOCK_SAMPLES = int(os.environ.get("CLOCK_SAMPLES", "2"))
+CLOCK_SAMPLE_GAP = 0.3
+
 class BrokerClock:
     """Fuente Única Centralizada de Tiempo para todo el Scanner."""
     def __init__(self):
@@ -216,14 +640,53 @@ class BrokerClock:
         self._last_sync_local: float = 0.0
         self.status: ClockStatus = ClockStatus.LOCAL_FALLBACK
         self._lock = threading.Lock()
+        self._rejects = 0
+        self._last_warn = 0.0
 
-    def sync_with_broker(self, broker_timestamp: float) -> None:
+    def sync_with_broker(self, broker_timestamp) -> bool:
+        """Acepta el reloj del broker SOLO si es plausible. Devuelve True si se
+        aplicó. Un valor absurdo se rechaza y se sigue con el reloj local."""
+        try:
+            ts = float(broker_timestamp)
+        except (TypeError, ValueError):
+            return False
+
+        now_local = time.time()
+        # Sin mensaje 'timeSync' la librería devuelve time.time()/1000 ≈ 1.78e6
+        # (año 1970). Un desfase así rompería todo el escáner.
+        if not (CLOCK_SANE_EPOCH_MIN < ts < CLOCK_SANE_EPOCH_MAX):
+            self._reject(f"timestamp no plausible ({ts:.0f})")
+            return False
+
+        offset = ts - now_local
+        if abs(offset) > CLOCK_MAX_SKEW:
+            self._reject(f"desfase de {offset:.1f}s > {CLOCK_MAX_SKEW:.0f}s")
+            return False
+
         with self._lock:
-            now_local = time.time()
-            self._offset = broker_timestamp - now_local
+            self._offset = offset
             self._last_sync_local = now_local
             self.status = ClockStatus.SYNCED
-            log.info(f"[CLOCK] Broker time synchronized. Offset: {self._offset:.3f}s")
+        log.info(f"[CLOCK] Reloj del broker sincronizado. Offset: {offset:+.3f}s")
+        return True
+
+    def _reject(self, motivo: str):
+        """Descarta una sincronización inválida sin inundar el log."""
+        with self._lock:
+            self._rejects += 1
+            rejects = self._rejects
+            warn = (time.time() - self._last_warn) > 60
+            if warn:
+                self._last_warn = time.time()
+        if warn:
+            log.warning(f"[CLOCK] Sincronización del broker rechazada ({motivo}). "
+                        f"Se mantiene el reloj local. Rechazos: {rejects}")
+
+    def reset_to_local(self):
+        """Vuelve al reloj local (p. ej. tras perder la conexión)."""
+        with self._lock:
+            self._offset = 0.0
+            self.status = ClockStatus.LOCAL_FALLBACK
 
     def now_ts(self) -> float:
         with self._lock:
@@ -249,7 +712,8 @@ class BrokerClock:
             "utc_time": now_b.strftime("%H:%M:%S"),
             "colombia_time": now_c.strftime("%H:%M:%S"),
             "status": self.status.value,
-            "last_sync": self.last_sync_time_str()
+            "last_sync": self.last_sync_time_str(),
+            "offset": round(self._offset, 3)
         }
 
 broker_clock = BrokerClock()
@@ -390,6 +854,10 @@ class ScanMetrics:
         self.otc_open_count = 0
         self.closed_count = 0
         self.no_data_count = 0
+        # Universo: cuántos activos del universo curado tienen contrato de
+        # 1 minuto y cuántos se descartaron por no tenerlo (dato del broker).
+        self.assets_1min = 0
+        self.assets_no_1min = 0
 
 scan_metrics = ScanMetrics()
 
@@ -397,6 +865,17 @@ scan_metrics = ScanMetrics()
 # AUDITORÍA LOCAL DE SEÑALES (CSV)
 # ==========================================================
 class SignalAuditLogger:
+    """Registro CSV de señales para poder AUDITAR cada disparo a posteriori.
+
+    Incluye el motivo exacto (BB %, umbral aplicado, RSI, DAMOA y volumen), que
+    es lo que permite decidir con datos si conviene endurecer el umbral de OTC.
+    Si el CSV viene de una versión anterior (menos columnas) se reescribe con la
+    cabecera nueva rellenando las filas viejas con vacíos: no se pierde el
+    histórico ni se desalinean las columnas.
+    """
+    COLUMNS = ["Timestamp_UTC", "Fecha_Hora_COT", "Activo", "Direccion", "RSI", "DAMOA",
+               "Tipo", "BB_pct", "Umbral_BB", "Volumen", "Vol_medio20", "Vol_rel"]
+
     def __init__(self, filename=AUDIT_FILE):
         self.filename = filename
         self._initialize_csv()
@@ -404,17 +883,42 @@ class SignalAuditLogger:
     def _initialize_csv(self):
         if not os.path.exists(self.filename):
             with open(self.filename, mode='w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(["Timestamp_UTC", "Fecha_Hora_COT", "Activo", "Direccion", "RSI", "DAMOA"])
-
-    def record(self, asset, direction, timestamp, rsi, damoa):
+                csv.writer(f).writerow(self.COLUMNS)
+            return
         try:
+            with open(self.filename, mode='r', newline='', encoding='utf-8') as f:
+                filas = list(csv.reader(f))
+        except Exception:
+            return
+        if not filas or filas[0] == self.COLUMNS:
+            return
+        ancho = len(self.COLUMNS)
+        migradas = [self.COLUMNS]
+        for fila in filas[1:]:
+            if not fila:
+                continue
+            if len(fila) < ancho:          # fila antigua: se rellena por la derecha
+                fila = fila + [""] * (ancho - len(fila))
+            migradas.append(fila)          # nunca se recorta información
+        try:
+            with open(self.filename, mode='w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerows(migradas)
+            log.info(f"[AUDIT] {self.filename}: cabecera actualizada a "
+                     f"{ancho} columnas ({len(migradas) - 1} filas conservadas).")
+        except Exception as e:
+            log.error(f"[AUDIT] no se pudo migrar el CSV: {e}")
+
+    def record(self, asset, direction, timestamp, rsi, damoa, detalle=None):
+        try:
+            detalle = detalle or {}
             display_name = format_asset_display_name(asset)
             dt_col = datetime.fromtimestamp(timestamp, tz=TZ_COLOMBIA)
             fecha_str = dt_col.strftime('%Y-%m-%d %H:%M:%S')
+            fila = [timestamp, fecha_str, display_name, direction, round(rsi, 2), round(damoa, 2),
+                    detalle.get("tipo", ""), detalle.get("bb_pct", ""), detalle.get("umbral_bb", ""),
+                    detalle.get("volumen", ""), detalle.get("vol_medio", ""), detalle.get("vol_rel", "")]
             with open(self.filename, mode='a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([timestamp, fecha_str, display_name, direction, round(rsi, 2), round(damoa, 2)])
+                csv.writer(f).writerow(fila)
             log.info(f"💾 Señal guardada en {self.filename}: {display_name}")
         except Exception as e:
             log.error(f"Error escribiendo en CSV: {e}")
@@ -442,11 +946,11 @@ class AssetTradingStatus:
     checked_at: int = 0
     reason: str = ""
 
-# Lista Maestra de Candidatos (Pares Forex Real y OTC)
-MASTER_CANDIDATE_PAIRS = [
-    "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
-    "EURJPY", "EURGBP", "GBPJPY"
-]
+# NOTA: aquí había una constante MASTER_CANDIDATE_PAIRS con 10 pares fijos que
+# NO se usaba en ninguna parte (código muerto). Se eliminó porque inducía a
+# error: el universo real lo define COMMON_PAIR_RANK + el catálogo del broker.
+# Si algún día hiciera falta forzar una lista, se puede hacer sin tocar código:
+#     set MAX_UNIVERSE=30     -> recorta el universo a los 30 pares de más rango
 
 # --- Filtro robusto de "par de divisas" ---
 # En IQ Option el mercado REAL (forex vivo) usa el sufijo "-OP" y el feed
@@ -469,6 +973,13 @@ FX_CURRENCIES = {
 # Solo los más operados (~40 activos entre REAL -OP y OTC). Se retiraron los
 # menos usados (PLN, PHP, CLP, THB, HKD, SGD y cruces menores GBP/NZD, NZD/CAD,
 # NZD/CHF, GBP/CAD). Ordenados por relevancia; prioridad si hay que recortar.
+#
+# IMPORTANTE: esta lista NO decide qué es operable a 1 minuto. Eso lo decide el
+# propio broker con 'expiration_times' (ver get_candidate_list): comprobado con
+# diagnostico_broker.py, el 89% del catálogo (249 de 278) sí ofrece 60 s, y los
+# que no (p. ej. USD/CHF OP: 120/180/300) se descartan automáticamente. Una
+# lista fija de pares se quedaría obsoleta y añadiría/quitaría activos que el
+# broker sí/no permite operar.
 COMMON_PAIR_RANK = {code: i for i, code in enumerate([
     # 1) Pares mayores (los más operados)
     "EURUSD", "USDJPY", "GBPUSD", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
@@ -479,7 +990,19 @@ COMMON_PAIR_RANK = {code: i for i, code in enumerate([
     "GBPCHF", "CADJPY", "CHFJPY", "AUDCAD", "AUDNZD", "NZDJPY", "EURNZD",
     "GBPAUD",
 ])}
-MAX_UNIVERSE = 40   # tope de activos monitoreados (~40 más comunes)
+# Tope de activos monitoreados a la vez. Medido en producción: 37 activos vivos
+# con ciclos de 0,15 s y 35+ streams estables, así que 40 no supone problema.
+# Es configurable por si se quiere recortar o ampliar:
+#     set MAX_UNIVERSE=30
+# OJO: NO conviene repartir los activos en lotes alternos por ciclo. El patrón
+# GSR exige velas de 1 minuto CONSECUTIVAS; si un activo se saltara ciclos, sus
+# velas tendrían huecos y el patrón no podría completarse nunca.
+MAX_UNIVERSE = int(os.environ.get("MAX_UNIVERSE", "40"))
+
+# Cada cuánto se revalida el universo con el broker (segundos). Los porcentajes
+# del tablero NO dependen de esto: se refrescan cada ~4 s con la vela en
+# formación (ver ScanController.refresh_proximity_live).
+MARKET_REFRESH_INTERVAL = float(os.environ.get("MARKET_REFRESH_INTERVAL", "60"))
 
 # Exclusiones explícitas de la variante REAL (-OP) que en la app de IQ Option
 # NO se puede operar a 1 minuto (aunque el catálogo las liste con 60 s):
@@ -497,33 +1020,68 @@ class LiveAssetManager:
 
     def get_candidate_list(self) -> List[Tuple[str, str]]:
         # UNIVERSO CURADO desde el snapshot del broker: solo los pares más
-        # comunes (COMMON_PAIR_RANK), REAL (-OP) y OTC (-OTC), con tope ~50.
+        # comunes (COMMON_PAIR_RANK), REAL (-OP) y OTC (-OTC), con tope ~40.
         # Reduce streams y carga sobre la conexión.
-        if not broker_market.assets:
-            return []
+        #
+        # Si el catálogo del broker todavía no está disponible se reconstruye la
+        # lista desde las constantes de la librería: antes se devolvía [] y el
+        # escáner se quedaba completamente a ciegas (tablero vacío y cero activos
+        # "sin explicación") hasta que llegase el snapshot.
         ranked = []
-        for name, info in broker_market.assets.items():
-            if name in FORBIDDEN_REAL_M1:
-                continue               # variante REAL no operable a 1 min en la app
-            if not FOREX_CODE_RE.match(name):
-                continue
-            # SOLO activos operables a 1 MINUTO (vencimiento 60 s). Si el broker
-            # reporta vencimientos y 60 s no está entre ellos, se descarta
-            # (p. ej. USD/CHF (OP), USD/BRL (OP): solo 2m/5m+).
-            ets = info.get("exp_times") or []
-            if ets and 60 not in ets:
-                continue
-            code = name[:6]            # el código de 6 letras (EURUSD)
-            rank = COMMON_PAIR_RANK.get(code)
-            if rank is None:
-                continue               # no está en la lista de pares comunes
-            base, quote = code[:3], code[3:]
-            if (base not in FX_CURRENCIES) or (quote not in FX_CURRENCIES):
-                continue
-            tipo = "OTC" if name.endswith("-OTC") else "REAL"
-            ranked.append((name, tipo, rank))
+        no_1min = 0
+        if broker_market.assets:
+            for name, info in broker_market.assets.items():
+                if name in FORBIDDEN_REAL_M1:
+                    # Variante REAL que la app de IQ Option no deja operar a 1 min
+                    # aunque el catálogo la liste con 60 s: es un descarte por
+                    # "no operable a 1 minuto", así que también se contabiliza.
+                    no_1min += 1
+                    continue
+                if not FOREX_CODE_RE.match(name):
+                    continue
+                # SOLO activos operables a 1 MINUTO (vencimiento 60 s). Si el broker
+                # reporta vencimientos y 60 s no está entre ellos, se descarta
+                # (p. ej. USD/CHF (OP): solo 2m/3m/5m; USD/BRL (OP): idem).
+                # Dato verificado con diagnostico_broker.py: 'expiration_times'
+                # llega SIEMPRE (0 activos sin el campo), así que este filtro es
+                # real y no un no-op.
+                ets = info.get("exp_times") or []
+                if ets and 60 not in ets:
+                    no_1min += 1
+                    continue
+                code = name[:6]            # el código de 6 letras (EURUSD)
+                rank = COMMON_PAIR_RANK.get(code)
+                if rank is None:
+                    continue               # no está en la lista de pares comunes
+                base, quote = code[:3], code[3:]
+                if (base not in FX_CURRENCIES) or (quote not in FX_CURRENCIES):
+                    continue
+                tipo = "OTC" if name.endswith("-OTC") else "REAL"
+                ranked.append((name, tipo, rank))
+        else:
+            # Sin snapshot: derivar de las constantes de la librería. Ojo: en
+            # consts.ACTIVES el mercado REAL es el código simple ('EURUSD') y el
+            # OTC lleva '-OTC'; el sufijo '-OP' sólo existe en el snapshot del
+            # broker, así que aquí se acepta cualquiera de las dos formas.
+            forbidden_codes = {n.split("-")[0] for n in FORBIDDEN_REAL_M1}
+            for code, rank in COMMON_PAIR_RANK.items():
+                otc = code + "-OTC"
+                if (not IQ_ACTIVES_CATALOG) or otc in IQ_ACTIVES_CATALOG:
+                    ranked.append((otc, "OTC", rank))
+                if code in forbidden_codes:
+                    continue
+                real = next((n for n in (code + "-OP", code)
+                             if (not IQ_ACTIVES_CATALOG) or n in IQ_ACTIVES_CATALOG), None)
+                if real:
+                    ranked.append((real, "REAL", rank))
+
         ranked.sort(key=lambda x: (x[2], x[0]))   # prioridad y orden alfabético
-        return [(n, t) for n, t, _ in ranked[:MAX_UNIVERSE]]
+        candidatos = [(n, t) for n, t, _ in ranked[:MAX_UNIVERSE]]
+        # Métricas para el panel: cuántos activos del catálogo ofrecen 1 minuto
+        # (se descartaron los que no) y cuántos se están vigilando.
+        scan_metrics.assets_1min = len(candidatos)
+        scan_metrics.assets_no_1min = no_1min
+        return candidatos
 
     def update_status(self, status: AssetTradingStatus):
         with self._lock:
@@ -572,19 +1130,54 @@ asset_manager = LiveAssetManager()
 # ==========================================================
 class CandleCache:
     MAX = 250
+
     def __init__(self):
         self.cache = {}
+
     def initialize(self, asset, candles):
-        self.cache[asset] = deque(candles, maxlen=self.MAX)
+        self.cache[asset] = deque(list(candles)[-self.MAX:], maxlen=self.MAX)
+
+    def upsert(self, asset, candles):
+        """Fusiona velas nuevas respetando el orden temporal.
+
+        Antes sólo se añadía la vela más reciente y se IGNORABA toda vela con el
+        mismo timestamp: la vela en formación quedaba congelada con un cierre
+        parcial que después se usaba como si fuera una vela CERRADA, corrompiendo
+        indicadores y patrón. Ahora la última vela se refresca (y queda con su
+        cierre real al cerrarse) y se rellenan los huecos si el ciclo se saltó
+        algún minuto."""
+        if not candles:
+            return
+        buf = self.cache.get(asset)
+        if buf is None:
+            self.initialize(asset, candles)
+            return
+        last_ts = buf[-1].timestamp
+        for c in candles:
+            if c.timestamp > last_ts:
+                buf.append(c)
+                last_ts = c.timestamp
+            elif c.timestamp == last_ts:
+                buf[-1] = c
+            # timestamps anteriores: ya no interesan
+
     def append(self, asset, candle):
-        if asset not in self.cache:
-            return
-        last = self.cache[asset][-1]
-        if last.timestamp == candle.timestamp:
-            return
-        self.cache[asset].append(candle)
+        self.upsert(asset, [candle])
+
     def get(self, asset):
         return list(self.cache.get(asset, []))
+
+
+candle_cache = CandleCache()
+
+# Mínimo de velas para calcular indicadores y patrón con garantías.
+# Antes había TRES umbrales distintos (50 en el feed, 200 en el validador y 30
+# en los indicadores): un activo podía quedar marcado OPEN y luego ser ignorado
+# en silencio por el pipeline. Ahora hay uno solo y coherente.
+MIN_CANDLES = 60
+HISTORY_BACKOFF = 120.0        # espera inicial entre reintentos de histórico
+HISTORY_BACKOFF_MAX = 900.0    # tope de la espera (15 min) para activos tercos
+STALE_TOLERANCE = int(os.environ.get("STALE_TOLERANCE", "3"))  # avisos seguidos antes de cerrar
 
 candle_cache = CandleCache()
 
@@ -594,6 +1187,87 @@ class LiveMarketFeed:
 
     def __init__(self):
         self.market = {}
+        self._hist_last = {}       # último intento de histórico por activo
+        self._hist_wait = {}       # espera actual por activo (crece si falla)
+        self._last_reason = {}     # anti-inundación del log por activo
+        self._stale_streak = {}    # avisos de vela vieja consecutivos por activo
+
+    def _ausente(self, asset) -> bool:
+        """Histéresis de 'activo ausente' por vela atrasada.
+
+        Antes, un solo ciclo con la vela un poco atrasada marcaba el activo como
+        STALE_DATA y lo sacaba de la lista de operables. Eso además llama a
+        CandleStreamManager.stop(), que BORRA el estado GSR y la caché de velas
+        de ese activo: un salto puntual del broker destruía el patrón que estaba
+        formándose. Ahora se toleran STALE_TOLERANCE avisos seguidos y sólo se
+        cierra de verdad si se mantiene (3 ciclos ≈ 3 minutos).
+        Devuelve True cuando hay que cerrarlo ya."""
+        racha = self._stale_streak.get(asset, 0) + 1
+        self._stale_streak[asset] = racha
+        return racha >= STALE_TOLERANCE
+
+    def _ausente_reset(self, asset):
+        self._stale_streak[asset] = 0
+
+    def _log_once(self, asset, key, level, message):
+        """Registra un aviso sólo cuando cambia el motivo (evita que el log se
+        llene con las mismas 40 líneas 'NO_DATA' en cada ciclo)."""
+        if self._last_reason.get(asset) == key:
+            return
+        self._last_reason[asset] = key
+        getattr(log, level)(message)
+
+    def _candles_for(self, asset, allow_history=True):
+        """Velas más frescas disponibles, en este orden:
+        1) stream en tiempo real (lo normal y barato),
+        2) caché local,
+        3) histórico del broker (caro: con freno por activo).
+
+        El histórico ya NO se pide en cada ciclo: era el origen de los ~200 s
+        bloqueados por refresco (40 activos x 5 s de timeout) con los que el
+        bucle principal dejaba de escanear.
+
+        Si un activo no devuelve histórico, su espera se DUPLICA hasta 15 min
+        (en lugar de eliminarlo del monitoreo para siempre: los activos OTC se
+        pausan y vuelven, p. ej. en el rollover, y deben recuperarse solos)."""
+        candles = candle_streams.get_realtime(asset)
+        if candles and len(candles) >= MIN_CANDLES:
+            candle_cache.upsert(asset, candles)
+            return candle_cache.get(asset), "STREAM"
+
+        cached = candle_cache.get(asset)
+        if cached and len(cached) >= MIN_CANDLES:
+            return cached, "CACHE"
+        if not allow_history:
+            return (cached or None), "CACHE"
+
+        # Si el activo YA tiene stream suscrito, el histórico llega por el propio
+        # stream (start_candles_stream carga MAXDICT velas en real_time_candles),
+        # así que NO se pide por la conexión compartida. Esto evita que un hilo
+        # se quede esperando el candado de velas mientras se suscriben 40 streams
+        # (era lo que bloqueaba el bucle del escáner durante minutos).
+        if candle_streams.is_streaming(asset):
+            return (cached or None), "STREAM_INICIANDO"
+
+        now = time.time()
+        espera = self._hist_wait.get(asset, HISTORY_BACKOFF)
+        if now - self._hist_last.get(asset, 0.0) < espera:
+            return (cached or None), "ESPERA"
+        self._hist_last[asset] = now
+        hist = iq.get_candles(asset, self.PERIOD, self.CANDLES)
+        if hist and len(hist) >= MIN_CANDLES:
+            candle_cache.upsert(asset, hist)
+            if espera != HISTORY_BACKOFF:
+                log.info(f"[MARKET] {format_asset_display_name(asset)}: histórico "
+                         f"recuperado; vuelve al intervalo normal de {HISTORY_BACKOFF:.0f}s")
+            self._hist_wait[asset] = HISTORY_BACKOFF
+        else:
+            nueva = min(espera * 2, HISTORY_BACKOFF_MAX)
+            if nueva != espera:
+                log.info(f"[MARKET] {format_asset_display_name(asset)}: sin histórico; "
+                         f"se reintentará en {nueva:.0f}s")
+            self._hist_wait[asset] = nueva
+        return candle_cache.get(asset), "HISTORICO"
 
     def validate_and_fetch_asset(self, asset: str, asset_type: str) -> AssetTradingStatus:
         now_broker = int(broker_clock.now_ts())
@@ -611,7 +1285,8 @@ class LiveMarketFeed:
                 reason="Disponibilidad del broker no válida (UNKNOWN/STALE)"
             )
             self.market.pop(asset, None)
-            log.warning(f"[MARKET] {format_asset_display_name(asset)} -> CERRADO (disponibilidad del broker no válida)")
+            self._log_once(asset, "no-broker", "warning",
+                           f"[MARKET] {format_asset_display_name(asset)} -> CERRADO (disponibilidad del broker no válida)")
             return status
 
         # Disponibilidad del activo según el broker (enabled && !is_suspended).
@@ -627,12 +1302,13 @@ class LiveMarketFeed:
                 reason="Broker: activo no disponible/cerrado"
             )
             self.market.pop(asset, None)
-            log.warning(f"[MARKET] {format_asset_display_name(asset)} -> CERRADO (broker: no disponible)")
+            self._log_once(asset, "cerrado", "warning",
+                           f"[MARKET] {format_asset_display_name(asset)} -> CERRADO (broker: no disponible)")
             return status
 
-        candles = iq.get_candles(asset, self.PERIOD, self.CANDLES, now_broker)
+        candles, source = self._candles_for(asset)
 
-        if candles is None or len(candles) < 50:
+        if not candles or len(candles) < MIN_CANDLES:
             status = AssetTradingStatus(
                 asset=asset,
                 asset_type=asset_type,
@@ -640,10 +1316,12 @@ class LiveMarketFeed:
                 status=AssetStatusEnum.NO_DATA,
                 last_candle_time=0,
                 checked_at=now_broker,
-                reason="El broker no devolvió suficientes velas."
+                reason=f"Sin velas suficientes ({len(candles or [])}/{MIN_CANDLES})."
             )
             self.market.pop(asset, None)
-            log.warning(f"[MARKET] {format_asset_display_name(asset)} -> NO_DATA")
+            self._log_once(asset, "nodata", "warning",
+                           f"[MARKET] {format_asset_display_name(asset)} -> NO_DATA "
+                           f"(velas {len(candles or [])}/{MIN_CANDLES}, fuente {source})")
             return status
 
         last_candle_ts = candles[-1].timestamp
@@ -651,6 +1329,21 @@ class LiveMarketFeed:
 
         # === VALIDACIÓN POR SESIÓN Y TIPO DE ACTIVO ===
         if not is_asset_available_in_session(asset, asset_type, age):
+            if not self._ausente(asset):
+                # Histéresis: un ciclo con la vela algo atrasada NO cierra el
+                # activo. Cerrarlo llama a CandleStreamManager.stop(), que borra
+                # su estado GSR y la caché: un salto puntual del broker destruía
+                # el patrón que se estaba formando. Se tolera y se mantiene el
+                # estado anterior (el patrón sólo avanza con velas nuevas).
+                previo = asset_manager.get_status(asset)
+                self._log_once(asset, f"tolerado:{age // 30}", "info",
+                               f"[MARKET] {format_asset_display_name(asset)} con vela de hace "
+                               f"{age}s: se tolera "
+                               f"({self._stale_streak.get(asset)}/{STALE_TOLERANCE}) sin cerrarlo")
+                return previo or AssetTradingStatus(
+                    asset=asset, asset_type=asset_type, tradable=True,
+                    status=AssetStatusEnum.OPEN, last_candle_time=last_candle_ts,
+                    checked_at=now_broker, reason="Vela atrasada (tolerada)")
             status = AssetTradingStatus(
                 asset=asset,
                 asset_type=asset_type,
@@ -661,7 +1354,9 @@ class LiveMarketFeed:
                 reason=f"Activo no disponible en esta sesión (edad vela: {age}s)"
             )
             self.market.pop(asset, None)
-            log.warning(f"[MARKET] {format_asset_display_name(asset)} -> CERRADO (edad: {age}s)")
+            self._log_once(asset, f"viejo:{age // 30}", "warning",
+                           f"[MARKET] {format_asset_display_name(asset)} -> CERRADO "
+                           f"(vela de hace {age}s en {self._stale_streak.get(asset)} avisos seguidos)")
             return status
 
         # Si pasó la validación, está abierto
@@ -674,71 +1369,92 @@ class LiveMarketFeed:
             checked_at=now_broker,
             reason="OPEN"
         )
+        self._ausente_reset(asset)
 
-        if asset not in candle_cache.cache:
-            candle_cache.initialize(asset, candles)
-        else:
-            candle_cache.append(asset, candles[-1])
-
-        self.market[asset] = candle_cache.get(asset)
+        self.market[asset] = candles
         scan_metrics.candles_processed += len(candles)
-        log.info(f"[MARKET] {format_asset_display_name(asset)} -> OPEN (Vela viva hace {age}s)")
+        self._log_once(asset, f"open:{source}", "info",
+                       f"[MARKET] {format_asset_display_name(asset)} -> OPEN "
+                       f"(vela viva hace {age}s, fuente {source})")
         return status
 
     def refresh_market_sessions(self):
-        if not iq.is_connected():
-            log.warning("[MARKET] Sin conexión con el broker. Reintentando...")
-            if not ensure_connected():
-                return
+        if not ensure_connected():
+            log.warning("[MARKET] Sin sesión con el broker: refresco de sesiones omitido.")
+            return
+
+        # Sin catálogo válido todavía no se puede decidir nada: si se continuara,
+        # los 40 activos se marcarían como CERRADOS en falso durante el arranque
+        # (el catálogo tarda unos segundos en llegar tras conectar).
+        if not broker_market.valid():
+            log.info("[MARKET] Catálogo del broker aún no disponible: refresco omitido.")
+            return
 
         candidates = asset_manager.get_candidate_list()
+        if not candidates:
+            log.warning("[MARKET] Sin candidatos: el catálogo del broker aún no está listo.")
+            return
+
         for asset, asset_type in candidates:
-            status = self.validate_and_fetch_asset(asset, asset_type)
+            try:
+                status = self.validate_and_fetch_asset(asset, asset_type)
+            except Exception as e:
+                log.warning(f"[MARKET] Error validando {asset}: {e}")
+                continue
             asset_manager.update_status(status)
 
         asset_manager.rebuild_active_assets()
-
-        # Detección de "media conexión": si había activos operables y de pronto
-        # son 0 (todo NO_DATA con el broker "conectado"), el canal está muerto:
-        # forzamos una reconexión para no quedarnos escaneando nada.
-        prev_count = getattr(self, "_last_tradable_count", 0)
-        cur_count = len(asset_manager.active_tradable_assets)
-        if prev_count > 0 and cur_count == 0:
-            log.warning("[MARKET] Se perdieron activos que antes operaban (posible canal muerto). Forzando reconexión IQ...")
-            ensure_connected()
-        self._last_tradable_count = cur_count
+        self._last_tradable_count = len(asset_manager.active_tradable_assets)
+        log.info(f"[MARKET] Universo: {scan_metrics.assets_1min} activos con contrato de 1 min "
+                 f"({scan_metrics.assets_no_1min} descartados por no ofrecer vencimiento de 60 s).")
 
     def fast_update_active(self):
+        """Ruta rápida (cada minuto): usa el stream en tiempo real. NO pide
+        histórico: si un activo se queda sin datos, el refresco de sesiones (cada
+        60 s) decide si sigue vivo o se cierra."""
         active = asset_manager.all_tradable()
         now_broker = int(broker_clock.now_ts())
 
         for asset in active:
             st = asset_manager.get_status(asset)
             asset_type = st.asset_type if st else "REAL"
-            # TIEMPO REAL: preferir el stream (realtime) cuando esté listo;
-            # get_candles() queda solo como histórico/fallback inicial.
+
             candles = candle_streams.get_realtime(asset)
-            if not candles or len(candles) < 50:
-                candles = iq.get_candles(asset, self.PERIOD, self.CANDLES, now_broker)
+            if candles and len(candles) >= MIN_CANDLES:
+                candle_cache.upsert(asset, candles)
+            candles = candle_cache.get(asset)
 
-            if candles and len(candles) >= 50:
-                last_ts = candles[-1].timestamp
-                age = now_broker - last_ts
-                # Misma ventana por tipo que la validación principal:
-                max_age = LIVE_WINDOW_OTC if asset_type == "OTC" else LIVE_WINDOW_REAL
-                if age <= max_age:
-                    candle_cache.append(asset, candles[-1])
-                    self.market[asset] = candle_cache.get(asset)
-                    continue
-                # La vela dejó de refrescar: datos atrasados (stale).
-                if st:
-                    st.tradable = False
-                    st.status = AssetStatusEnum.STALE_DATA
-                    st.reason = f"Vela sin refrescar (edad {age}s > {max_age}s)"
-                    asset_manager.update_status(st)
-                self.market.pop(asset, None)
+            if not candles or len(candles) < MIN_CANDLES:
+                self._log_once(asset, "fast-nodata", "debug",
+                               f"[MARKET] {format_asset_display_name(asset)} sin velas en Fast Loop.")
+                continue
 
-            log.warning(f"[MARKET] {format_asset_display_name(asset)} presentó anomalía en Fast Loop.")
+            last_ts = candles[-1].timestamp
+            age = now_broker - last_ts
+            max_age = LIVE_WINDOW_OTC if asset_type == "OTC" else LIVE_WINDOW_REAL
+            if age <= max_age:
+                self.market[asset] = candles
+                self._ausente_reset(asset)
+                continue
+
+            # La vela dejó de refrescar: datos atrasados (stale). Se toleran
+            # STALE_TOLERANCE ciclos seguidos antes de cerrar: cerrar de inmediato
+            # ante un salto puntual borraba el patrón GSR en curso.
+            if not self._ausente(asset):
+                self._log_once(asset, f"fast-tolera:{age // 30}", "info",
+                               f"[MARKET] {format_asset_display_name(asset)} sin refrescar "
+                               f"({age}s > {max_age}s): se tolera "
+                               f"({self._stale_streak.get(asset)}/{STALE_TOLERANCE})")
+                continue
+            if st:
+                st.tradable = False
+                st.status = AssetStatusEnum.STALE_DATA
+                st.reason = f"Vela sin refrescar (edad {age}s > {max_age}s)"
+                asset_manager.update_status(st)
+            self.market.pop(asset, None)
+            self._log_once(asset, "fast-stale", "warning",
+                           f"[MARKET] {format_asset_display_name(asset)} en Fast Loop sin refrescar "
+                           f"(edad {age}s > {max_age}s, {self._stale_streak.get(asset)} ciclos seguidos)")
 
     def get(self, asset):
         return self.market.get(asset)
@@ -752,7 +1468,7 @@ market_feed = LiveMarketFeed()
 # CÁLCULOS MATEMÁTICOS E INDICADORES GSR
 # ==========================================================
 class CandleValidator:
-    MINIMUM = 200
+    MINIMUM = MIN_CANDLES
     def validate(self, candles):
         return candles is not None and len(candles) >= self.MINIMUM
 
@@ -794,6 +1510,34 @@ class IncrementalIndicatorEngine:
 
 indicator_engine = IncrementalIndicatorEngine()
 
+def _ema_last_value(x, alpha: float) -> float:
+    """Último valor de la EMA recursiva de pandas ewm(alpha=..., adjust=False):
+    y[0] = x[0]  y  y[i] = (1-alpha)*y[i-1] + alpha*x[i].
+
+    Se itera con float de Python (no con escalares numpy: cada operación con un
+    np.float64 crea un objeto y cuesta ~10 µs, 60 veces más que un float)."""
+    values = x.tolist() if hasattr(x, "tolist") else list(x)
+    acc = values[0]
+    one_minus = 1.0 - alpha
+    for v in values[1:]:
+        acc = one_minus * acc + alpha * v
+    return acc
+
+
+def _trend_ok_np(close: np.ndarray) -> bool:
+    """Igual que _trend_ok() pero en numpy (mismo resultado, ~20x más rápido)."""
+    fast = _ema_last_value(close, 2.0 / (TREND_FAST + 1.0))
+    slow = _ema_last_value(close, 2.0 / (TREND_SLOW + 1.0))
+    sep = float(fast - slow)
+    if close.size >= 100:
+        sd = float(close[-100:].std(ddof=1))     # rolling(100).std() usa ddof=1
+    else:
+        sd = float("nan")
+    if not np.isfinite(sd) or sd <= 0:
+        return True   # sin volatilidad medible -> no bloquear
+    return abs(sep) / sd < TREND_FILTER_Z
+
+
 def _trend_ok(close) -> bool:
     """P4: devuelve True si el mercado NO está en tendencia fuerte (apto para
     la reversión a la media de GSR). Se bloquea cuando la separación entre una
@@ -808,6 +1552,82 @@ def _trend_ok(close) -> bool:
     return abs(sep) / sd < TREND_FILTER_Z
 
 
+# Motor de indicadores: "numpy" (por defecto) o "ta" (implementación original
+# con pandas + librería ta, se conserva como referencia verificable).
+# Motivo del cambio: calcular BB+RSI+DAMOA con pandas costaba 215 ms por activo,
+# es decir ~8,6 s por ciclo con 40 activos: la señal podía llegar hasta 8 s
+# tarde dentro de una vela de 1 minuto. Las fórmulas son exactamente las mismas
+# (se comparan en el auto-test contra la versión con 'ta').
+INDICATORS_ENGINE = os.environ.get("INDICATORS_ENGINE", "numpy").strip().lower()
+
+
+def _indicators_ta(close: np.ndarray) -> tuple:
+    """Implementación original (pandas + ta). Referencia de contraste."""
+    bb = ta.volatility.BollingerBands(pd.Series(close), window=BB_PERIOD, window_dev=BB_STD)
+    upper = float(bb.bollinger_hband().iloc[-1])
+    middle = float(bb.bollinger_mavg().iloc[-1])
+    lower = float(bb.bollinger_lband().iloc[-1])
+    rsi_val = float(ta.momentum.RSIIndicator(pd.Series(close), window=RSI_PERIOD).rsi().iloc[-1])
+
+    df_close = pd.Series(close)
+    ema = df_close.ewm(span=DAMOA_PERIOD, adjust=False).mean()
+    volatilidad_damoa = np.sqrt((df_close.diff() ** 2).rolling(DAMOA_PERIOD).mean())
+    vol_piso = volatilidad_damoa.where(
+        volatilidad_damoa > (df_close.abs() * DAMOA_VOL_FLOOR_REL),
+        df_close.abs() * DAMOA_VOL_FLOOR_REL
+    )
+    damoa_serie = ((df_close - ema) / vol_piso) * 10
+    damoa_val = float(np.clip(float(damoa_serie.fillna(0.0).iloc[-1]), -DAMOA_CLAMP, DAMOA_CLAMP))
+    return upper, middle, lower, rsi_val, damoa_val, _trend_ok(close)
+
+
+def _indicators_numpy(close: np.ndarray) -> tuple:
+    """Mismas fórmulas que _indicators_ta() pero en numpy."""
+    n = close.size
+
+    # --- Bandas de Bollinger (ta: rolling(BB_PERIOD, min_periods=BB_PERIOD), std ddof=0)
+    window = close[-BB_PERIOD:] if n >= BB_PERIOD else close
+    mavg = float(window.mean())
+    mstd = float(window.std(ddof=0))
+    upper = mavg + BB_STD * mstd
+    middle = mavg
+    lower = mavg - BB_STD * mstd
+
+    # --- RSI (ta: Wilder con ewm(alpha=1/period, adjust=False); diff NaN -> 0)
+    diffs = np.diff(close)
+    up = np.zeros(n, dtype=float)
+    down = np.zeros(n, dtype=float)
+    up[1:] = np.where(diffs > 0, diffs, 0.0)
+    down[1:] = np.where(diffs < 0, -diffs, 0.0)
+    alpha_rsi = 1.0 / RSI_PERIOD
+    emaup = _ema_last_value(up, alpha_rsi)
+    emadn = _ema_last_value(down, alpha_rsi)
+    if emadn == 0:
+        rsi_val = 100.0
+    else:
+        rsi_val = 100.0 - (100.0 / (1.0 + (emaup / emadn)))
+
+    # --- DAMOA
+    ema5 = _ema_last_value(close, 2.0 / (DAMOA_PERIOD + 1.0))
+    vol = float("nan")
+    # rolling(5).mean() sobre las diferencias al cuadrado: NaN en los índices
+    # 0..4 (la primera diferencia es NaN) -> el último valor sólo es válido si
+    # hay al menos 6 velas.
+    if n >= DAMOA_PERIOD + 2:
+        sq = (close[-(DAMOA_PERIOD):] - close[-(DAMOA_PERIOD + 1):-1]) ** 2
+        vol = float(np.sqrt(sq.mean()))      # RMS, igual que la versión con pandas
+    piso = abs(float(close[-1])) * DAMOA_VOL_FLOOR_REL
+    vol_use = vol if (np.isfinite(vol) and vol > piso) else piso
+    if vol_use == 0:
+        damoa_val = 0.0
+    else:
+        damoa_val = ((float(close[-1]) - ema5) / vol_use) * 10.0
+        if not np.isfinite(damoa_val):
+            damoa_val = 0.0
+    damoa_val = float(np.clip(damoa_val, -DAMOA_CLAMP, DAMOA_CLAMP))
+    return upper, middle, lower, rsi_val, damoa_val, _trend_ok_np(close)
+
+
 def calculate_indicators(candles, include_forming: bool = False) -> IndicatorSnapshot:
     # P2: por defecto se trabaja SOLO con velas cerradas (se descarta la vela en
     # formación, candles[-1]) para que BB/RSI/DAMOA y el body-outside apunten al
@@ -819,23 +1639,10 @@ def calculate_indicators(candles, include_forming: bool = False) -> IndicatorSna
         return None
     close = np.array([x.close for x in data], dtype=float)
 
-    bb = ta.volatility.BollingerBands(pd.Series(close), window=20, window_dev=2)
-    upper = bb.bollinger_hband().iloc[-1]
-    middle = bb.bollinger_mavg().iloc[-1]
-    lower = bb.bollinger_lband().iloc[-1]
-    rsi_val = ta.momentum.RSIIndicator(pd.Series(close), window=14).rsi().iloc[-1]
-
-    df_close = pd.Series(close)
-    ema = df_close.ewm(span=5, adjust=False).mean()
-    volatilidad_damoa = np.sqrt((df_close.diff() ** 2).rolling(5).mean())
-    # P1: piso de volatilidad para que DAMOA no explote cuando la RMS tiende a 0,
-    # y acotado a ±DAMOA_CLAMP para descartar outliers (ej. los 9564 del CSV).
-    vol_piso = volatilidad_damoa.where(
-        volatilidad_damoa > (df_close.abs() * DAMOA_VOL_FLOOR_REL),
-        df_close.abs() * DAMOA_VOL_FLOOR_REL
-    )
-    damoa_serie = ((df_close - ema) / vol_piso) * 10
-    damoa_val = float(np.clip(damoa_serie.fillna(0.0).iloc[-1], -DAMOA_CLAMP, DAMOA_CLAMP))
+    if INDICATORS_ENGINE == "ta":
+        upper, middle, lower, rsi_val, damoa_val, trend = _indicators_ta(close)
+    else:
+        upper, middle, lower, rsi_val, damoa_val, trend = _indicators_numpy(close)
 
     indicator = IndicatorSnapshot(index=len(data)-1)
     indicator.bb_upper = upper
@@ -843,7 +1650,7 @@ def calculate_indicators(candles, include_forming: bool = False) -> IndicatorSna
     indicator.bb_lower = lower
     indicator.rsi = rsi_val
     indicator.damoa = damoa_val
-    indicator.trend_ok = True if include_forming else _trend_ok(close)
+    indicator.trend_ok = True if include_forming else trend
 
     current_candle = data[-1]
     indicator.body = abs(current_candle.close - current_candle.open)
@@ -881,6 +1688,19 @@ def body_outside_lower(candle, lower):
 
 def body_outside_percent(candle, indicator):
     return max(body_outside_upper(candle, indicator.bb_upper), body_outside_lower(candle, indicator.bb_lower))
+
+
+def body_outside_umbral(asset: str) -> float:
+    """Umbral de ruptura que se aplica a ESTE activo (REAL vs OTC).
+
+    OJO: body_outside_percent() sólo CALCULA el porcentaje; el umbral se aplica
+    en las comparaciones de detect_first_candle/detect_second_candle. Se conserva
+    la firma de body_outside_percent() para no romper backtest_gsr.py.
+
+    Por defecto REAL y OTC comparten el mismo valor calibrado (40.0). Para
+    endurecer sólo el mercado sintético:  set BODY_OUTSIDE_OTC=55
+    """
+    return BODY_OUTSIDE_OTC if str(asset).upper().endswith("-OTC") else BODY_OUTSIDE_REAL
 
 # ==========================================================
 # MÁQUINA DE ESTADOS Y REGLAS GSR (INTACTAS)
@@ -933,13 +1753,26 @@ class PatternEngine:
         return hashlib.md5(key.encode()).hexdigest()
 
 pattern_engine = PatternEngine()
-pattern_history = set()
+# Historial de patrones ya disparados. Es un dict (ordenado por inserción) en
+# lugar de un set para poder podar los más antiguos y que no crezca sin límite
+# en ejecuciones de días. El test `in` funciona igual.
+pattern_history = {}
+
+
+def _podar_pattern_history():
+    """Descarta los patrones más antiguos cuando se supera el tope.
+
+    Un patrón sólo se consulta en los minutos siguientes a formarse, así que
+    podar lo viejo no puede provocar que se repita una señal."""
+    while len(pattern_history) > PATTERN_HISTORY_MAX:
+        pattern_history.pop(next(iter(pattern_history)))
 
 def detect_first_candle(asset, candle, indicator):
     state = gsr_memory.get(asset)
+    umbral = body_outside_umbral(asset)
     if candle_color(candle) == "GREEN":
         outside = body_outside_upper(candle, indicator.bb_upper)
-        if outside >= BODY_OUTSIDE:
+        if outside >= umbral:
             state.phase = GSRPhase.PRIMERA_VELA
             state.direction = "PUT"
             state.progress = 25
@@ -949,7 +1782,7 @@ def detect_first_candle(asset, candle, indicator):
             return True
     elif candle_color(candle) == "RED":
         outside = body_outside_lower(candle, indicator.bb_lower)
-        if outside >= BODY_OUTSIDE:
+        if outside >= umbral:
             state.phase = GSRPhase.PRIMERA_VELA
             state.direction = "CALL"
             state.progress = 25
@@ -964,6 +1797,13 @@ def detect_second_candle(asset, candle, indicator):
     if state.phase != GSRPhase.PRIMERA_VELA or candle.timestamp == state.first_candle:
         return False
 
+    # El patrón GSR exige DOS velas de impulso CONSECUTIVAS. Si el ciclo se saltó
+    # un minuto (o la vela no llegó), se descarta el patrón en lugar de emparejar
+    # velas separadas como si fueran contiguas.
+    if candle.timestamp != state.first_candle + 60:
+        gsr_memory.reset(asset)
+        return False
+
     if state.direction == "PUT":
         if candle_color(candle) != "GREEN":
             gsr_memory.reset(asset)
@@ -975,7 +1815,7 @@ def detect_second_candle(asset, candle, indicator):
             return False
         outside = body_outside_lower(candle, indicator.bb_lower)
 
-    if outside < BODY_OUTSIDE:
+    if outside < body_outside_umbral(asset):
         gsr_memory.reset(asset)
         return False
 
@@ -986,6 +1826,43 @@ def detect_second_candle(asset, candle, indicator):
     state.pattern_id = pattern_engine.assign(state)
     gsr_events.add(asset, "SEGUNDA_VELA", state.direction)
     return True
+
+def _volumen_stats(asset) -> tuple:
+    """(volumen de la última vela cerrada, media de las anteriores, relativo).
+
+    Devuelve (None, None, None) si no hay datos; el relativo es None cuando la
+    media es 0 (el broker no publica volumen), para no dividir por cero.
+    """
+    candles = candle_cache.get(asset)
+    if not candles or len(candles) < VOLUME_LOOKBACK + 2:
+        return None, None, None
+    previos = [c.volume for c in candles[-(VOLUME_LOOKBACK + 1):-1]]
+    ultimo = float(candles[-2].volume)
+    if not previos or max(previos) <= 0:
+        return ultimo, 0.0, None
+    media = sum(previos) / len(previos)
+    return ultimo, media, ((ultimo / media) if media > 0 else None)
+
+
+def _volumen_ok(asset) -> tuple:
+    """Filtro de volumen OPCIONAL. Devuelve (apto, detalle).
+
+    Exige que la última vela cerrada tenga un volumen >= VOLUME_MIN_REL veces la
+    media de las VOLUME_LOOKBACK anteriores. Viene DESACTIVADO por defecto y se
+    auto-desactiva cuando el activo no publica volumen utilizable: medido sobre
+    1,6 M de velas reales, los activos OTC entregan volumen 0 en TODAS las velas
+    (los REAL sí traen volumen real). Sin ese control, activarlo bloquearía el
+    100% de las señales OTC; con él, el filtro actúa donde sí hay dato.
+    """
+    if not VOLUME_FILTER_ENABLED:
+        return True, "filtro de volumen desactivado"
+    ultimo, media, rel = _volumen_stats(asset)
+    if ultimo is None:
+        return True, "sin histórico de volumen suficiente"
+    if rel is None:
+        return True, "el broker no publica volumen (todo 0): filtro omitido"
+    return (rel >= VOLUME_MIN_REL), f"volumen relativo {rel:.2f} (mínimo {VOLUME_MIN_REL:.2f})"
+
 
 class GSRReadyEngine:
     def confirm(self, asset, indicator):
@@ -1014,6 +1891,14 @@ class GSRReadyEngine:
                 gsr_memory.reset(asset)
                 return False
 
+        # Filtro de volumen (opcional; ver _volumen_ok).
+        vol_ok, vol_detalle = _volumen_ok(asset)
+        if not vol_ok:
+            log.info(f"[GSR] {format_asset_display_name(asset)} descartado en la "
+                     f"confirmación: {vol_detalle}")
+            gsr_memory.reset(asset)
+            return False
+
         state.phase = GSRPhase.LISTA
         state.progress = 75
         state.ready = True
@@ -1027,31 +1912,20 @@ class GSRReadyEngine:
 
 ready_engine = GSRReadyEngine()
 
-def enviar_alerta_whatsapp(mensaje: str):
-    """Envía una alerta al grupo vía el puente local (whatsapp_bridge).
-    Si el puente está apagado, solo se registra un aviso (no rompe el escáner)."""
-    if not WHATSAPP_BRIDGE_ENABLED:
-        return
-    try:
-        import json as _json
-        import urllib.request as _urllib
-        payload = _json.dumps({"mensaje": mensaje}).encode("utf-8")
-        req = _urllib.Request(
-            WHATSAPP_BRIDGE_URL + "/enviar",
-            data=payload,
-            headers={"Content-Type": "application/json"}
-        )
-        with _urllib.urlopen(req, timeout=3) as resp:
-            resp.read()
-    except Exception as e:
-        log.warning(f"[WA] Alerta al grupo no enviada (¿puente apagado?): {e}")
+# (Aquí vivía el envío a un grupo externo mediante un puente local, que se
+#  eliminó el 21-sep-2026: la publicación migró por completo a la app.)
+#  la publicación de señales se hace ahora en Alí Binary Options.)
 
 
 def enviar_alerta_app(asset, direction, rsi, damoa, strength, entry_time_cot):
-    """Publica la señal en la app Alí Binary Options vía Cloud Function HTTP.
-    Desactivada si APP_SIGNAL_URL está vacío. Nunca rompe el escáner."""
+    """PUBLICACIÓN PRINCIPAL (Opción A): señal a Alí Binary Options por Cloud
+    Function HTTP, que a su vez escribe en Firestore.
+
+    Desactivada si APP_SIGNAL_URL está vacío (no rompe nunca el escáner).
+    El asset va en formato de broker ('EUR/USD' / 'EUR/USD (OTC)') y la hora en
+    zona Colombia, que es como los muestra la app."""
     if not APP_SIGNAL_URL:
-        return
+        return False
     try:
         import json as _json
         import urllib.request as _urllib
@@ -1073,9 +1947,12 @@ def enviar_alerta_app(asset, direction, rsi, damoa, strength, entry_time_cot):
                               headers={"Content-Type": "application/json"})
         with _urllib.urlopen(req, timeout=5) as resp:
             resp.read()
-        log.info("[APP] Señal publicada en la app Alí Binary Options")
+        log.info(f"📤 [APP] Señal publicada en Ali Binary Options: "
+                 f"{broker_search_name(asset)} {direction} {entry_time_cot}")
+        return True
     except Exception as e:
-        log.warning(f"[APP] No se pudo publicar la señal en la app: {e}")
+        log.warning(f"[APP] No se pudo publicar la señal en Ali Binary Options: {e}")
+        return False
 
 
 def enviar_alerta_firestore(asset, direction, rsi, damoa, strength, entry_time_cot):
@@ -1144,6 +2021,32 @@ def fire_signal(asset, opening, indicator):
         log.warning(f"[SIGNAL_BLOCKED] {format_asset_display_name(asset)} -> {motivo}")
         return
 
+    # ===== AUDITORÍA DEL DISPARO: motivo exacto =====
+    tipo = "OTC" if str(asset).upper().endswith("-OTC") else "REAL"
+    umbral_bb = body_outside_umbral(asset)
+    bb_pct = float(indicator.outside)
+    vol_ultimo, vol_media, vol_rel = _volumen_stats(asset)
+    detalle = {
+        "tipo": tipo,
+        "bb_pct": round(bb_pct, 2),
+        "umbral_bb": round(umbral_bb, 1),
+        "volumen": "" if vol_ultimo is None else round(vol_ultimo, 2),
+        "vol_medio": "" if vol_media is None else round(vol_media, 2),
+        "vol_rel": "" if vol_rel is None else round(vol_rel, 3),
+    }
+    log.info(
+        f"[SIGNAL] {format_asset_display_name(asset)} {state.direction} | "
+        f"BB {bb_pct:.1f}% (umbral {umbral_bb:.0f}%) | RSI {state.rsi:.1f} | "
+        f"DAMOA {state.damoa:.1f} | vol {detalle['volumen']} "
+        f"(media {detalle['vol_medio']}, rel {detalle['vol_rel']}) | {tipo}"
+    )
+    if tipo == "OTC":
+        # Evidencia para decidir si conviene endurecer el umbral de OTC: se
+        # registra qué habría pasado con el umbral estricto, sin aplicarlo.
+        log.info(f"[SIGNAL] {format_asset_display_name(asset)} con umbral estricto OTC "
+                 f"{OTC_STRICT_REFERENCE:.0f}%: "
+                 f"{'SE HABRÍA DESCARTADO' if bb_pct < OTC_STRICT_REFERENCE else 'habría pasado'}")
+
     with LOCK:
         SIGNALS.insert(0, Signal(
             asset=asset,
@@ -1155,35 +2058,28 @@ def fire_signal(asset, opening, indicator):
             message="GSR Síncrono Activado"
         ))
         state.signal_sent = True
-        pattern_history.add(state.pattern_id)
-        audit_logger.record(asset, state.direction, opening.timestamp, state.rsi, state.damoa)
+        pattern_history[state.pattern_id] = opening.timestamp
+        _podar_pattern_history()
+        audit_logger.record(asset, state.direction, opening.timestamp,
+                            state.rsi, state.damoa, detalle)
 
-        # === ALERTA AL GRUPO DE WHATSAPP (puente local) ===
-        try:
-            hora_utc = datetime.fromtimestamp(int(opening.timestamp), tz=TZ_UTC).strftime("%H:%M")
-        except Exception:
-            hora_utc = str(int(opening.timestamp))
-        alerta = (
-            f"⚡ SEÑAL GSR - {format_asset_display_name(asset)}\n"
-            f"Dirección: {state.direction}\n"
-            f"RSI: {state.rsi:.1f} | DAMOA: {state.damoa:.1f}\n"
-            f"Hora (UTC): {hora_utc}\n"
-            f"⚠️ Señal automática de estrategia. No es consejo financiero."
-        )
-        threading.Thread(target=enviar_alerta_whatsapp, args=(alerta,), daemon=True).start()
-
-        # === PUBLICAR EN LA APP ALÍ BINARY OPTIONS (opcional, vía Cloud Function) ===
+        # === PUBLICAR EN ALÍ BINARY OPTIONS ===
+        # Vía principal (Opción A): Cloud Function 'postSignal' -> Firestore.
+        # Vía alternativa (Opción B): escritura directa en Firestore con service
+        # account. Cada una se activa sola si su configuración está presente; si
+        # no hay ninguna, la señal sólo queda en el log y en signals_audit.csv.
+        # (Canal externo eliminado el 21-sep-2026: la señal se publica en la app.)
         try:
             hora_cot = datetime.fromtimestamp(int(opening.timestamp), tz=TZ_COLOMBIA).strftime("%H:%M")
         except Exception:
             hora_cot = ""
+
         threading.Thread(
             target=enviar_alerta_app,
             args=(asset, state.direction, state.rsi, state.damoa, 75.0, hora_cot),
             daemon=True
         ).start()
 
-        # === Opción B: escribir directo en Firestore (app Alí Binary Options) ===
         threading.Thread(
             target=enviar_alerta_firestore,
             args=(asset, state.direction, state.rsi, state.damoa, 75.0, hora_cot),
@@ -1229,12 +2125,21 @@ class GSRConditionEngine:
 condition_engine = GSRConditionEngine()
 
 class ProgressEngine:
-    def calculate(self, row):
-        value = 0
-        if row["bb_ok"]: value += 40
-        if row["rsi_ok"]: value += 30
-        if row["damoa_ok"]: value += 30
-        return value
+    """Métrica de CONDICIONES (no de avance del patrón).
+
+    Cuenta cuántas de las tres condiciones GSR (BB, RSI, DAMOA) se cumplen en
+    este instante; es lo que el tablero muestra como '2/3'. Deliberadamente NO
+    es el porcentaje de la barra: la barra mide el avance del patrón secuencial
+    (0/25/50/100 según la fase). Mezclar ambos hacía que un activo pareciera
+    "casi listo" sólo por tener las tres condiciones extremas sin patrón
+    formado, y eso producía señales falsas en la versión anterior."""
+
+    KEYS = ("bb_ok", "rsi_ok", "damoa_ok")
+
+    def calculate(self, row) -> tuple:
+        cumplidas = sum(1 for k in self.KEYS if row.get(k))
+        return cumplidas, len(self.KEYS)
+
 
 progress_engine = ProgressEngine()
 
@@ -1247,14 +2152,11 @@ class GSRStage(Enum):
     DAMOA_OK = 5
     READY = 6
 
-class StageEngine:
-    def calculate(self, row):
-        if not row["bb_ok"]: return GSRStage.SECOND
-        if not row["rsi_ok"]: return GSRStage.RSI_OK
-        if not row["damoa_ok"]: return GSRStage.DAMOA_OK
-        return GSRStage.READY
-
-stage_engine = StageEngine()
+# NOTA: aquí vivía un StageEngine que recalculaba la ETAPA a partir de las
+# condiciones (BB/RSI/DAMOA), al margen de la fase real del patrón. No se usaba
+# en ninguna parte, pero era el origen de la confusión "25% con las condiciones
+# en verde": la etapa la determina SIEMPRE la fase del patrón secuencial
+# (ver ProximityEngine.update). Se eliminó para no dejar dos fuentes de verdad.
 
 class StageColor:
     COLORS = {
@@ -1309,8 +2211,17 @@ class ProximityEngine:
             "bb_ok": conditions["bb"],
             "rsi_ok": conditions["rsi"],
             "damoa_ok": conditions["damoa"],
-            "reason": reason_engine.explain(indicator)
+            "reason": reason_engine.explain(indicator),
+            "umbral_bb": round(body_outside_umbral(asset), 1)
         }
+
+        # Dos métricas DISTINTAS y complementarias (antes se confundían):
+        #   conditions_*  -> cuántas de las 3 condiciones se cumplen ahora (2/3)
+        #   progress      -> avance del patrón secuencial (0/25/50/100)
+        cumplidas, total = progress_engine.calculate(self.rows[asset])
+        self.rows[asset]["conditions_met"] = cumplidas
+        self.rows[asset]["conditions_total"] = total
+        self.rows[asset]["conditions_pct"] = int(round(100 * cumplidas / total)) if total else 0
 
         # Progreso/etapa HONESTOS: 'READY' (100%) solo cuando el patrón secuencial
         # está validado (fase LISTA). Antes se mostraba READY cuando una sola vela
@@ -1346,13 +2257,17 @@ class ProximityEngine:
                 fila = dict(row)
                 fila["status"] = "OPEN"
             else:
-                estado = st.status.name if st else "CLOSED"
+                # Fila "sin datos en vivo": vale tanto para un activo cerrado como
+                # para uno recién abierto del que el motor aún no tiene métricas.
+                # Antes ambos se pintaban igual ("CERRADO" + "PATRÓN GSR
+                # COMPLETO"), así que un activo que SÍ estaba operando aparecía
+                # como cerrado. Ahora se distingue con "ABRIENDO".
                 fila = {
                     "asset": format_asset_display_name(code),
                     "copy_name": broker_search_name(code),
                     "raw_asset": code,
                     "type": (st.asset_type if st else "REAL"),
-                    "status": estado,
+                    "status": "OPEN" if abierto else (st.status.name if st else "CLOSED"),
                     "age": "-",
                     "score": 0.0,
                     "phase": "OBSERVANDO",
@@ -1363,9 +2278,13 @@ class ProximityEngine:
                     "bb_ok": False,
                     "rsi_ok": False,
                     "damoa_ok": False,
-                    "reason": [],
+                    "reason": ["SIN DATOS AÚN"] if abierto else [],
                     "progress": 0,
-                    "stage": "CERRADO",
+                    "conditions_met": 0,
+                    "conditions_total": len(progress_engine.KEYS),
+                    "conditions_pct": 0,
+                    "umbral_bb": round(body_outside_umbral(code), 1),
+                    "stage": "ABRIENDO" if abierto else "CERRADO",
                     "color": "#8b949e"
                 }
             salida.append(fila)
@@ -1413,9 +2332,8 @@ class ScannerPipeline:
         candles = market_feed.get(asset)
         if not candle_validator.validate(candles): return
 
-        previous = candles[-3]
-        current = candles[-2]
-        opening = candles[-1]
+        current = candles[-2]      # última vela CERRADA
+        opening = candles[-1]      # vela en formación (la que se operaría)
 
         if not new_candle.detect(asset, current): return
 
@@ -1423,12 +2341,23 @@ class ScannerPipeline:
         indicator = indicator_engine.update(asset, candles)
         if indicator is None or not indicator_validator.validate(indicator): return
 
-        if state.phase == GSRPhase.OBSERVANDO: detect_first_candle(asset, previous, indicator)
-        elif state.phase == GSRPhase.PRIMERA_VELA: detect_second_candle(asset, current, indicator)
-        elif state.phase == GSRPhase.SEGUNDA_VELA: ready_engine.confirm(asset, indicator)
+        # La máquina de estados avanza UNA vela cerrada por ciclo y evalúa
+        # SIEMPRE la misma vela ('current', = candles[-2]) con los indicadores
+        # calculados justo en su cierre. Antes el primer paso evaluaba
+        # 'candles[-3]' contra los indicadores de 'candles[-2]': un look-ahead de
+        # una vela que contaminaba la detección del patrón.
+        if state.phase == GSRPhase.OBSERVANDO:
+            detect_first_candle(asset, current, indicator)
+        elif state.phase == GSRPhase.PRIMERA_VELA:
+            detect_second_candle(asset, current, indicator)
+        elif state.phase == GSRPhase.SEGUNDA_VELA:
+            ready_engine.confirm(asset, indicator)
         elif state.phase == GSRPhase.LISTA:
-            # P3: esperar una vela que CONFIRME la reversión antes de disparar.
-            if current.timestamp > state.second_candle and _confirm_reversal(asset, current, state):
+            # P3: esperar una vela CERRADA que CONFIRME la reversión antes de
+            # disparar. Debe ser posterior a la 2ª vela del patrón y cercana
+            # (si pasan demasiados minutos el patrón ya no es válido).
+            delta = current.timestamp - state.second_candle
+            if 0 < delta <= 180 and _confirm_reversal(asset, current, state):
                 fire_signal(asset, opening, indicator)
             elif state.confirm_deadline and int(broker_clock.now_ts()) > state.confirm_deadline:
                 gsr_memory.reset(asset)
@@ -1451,94 +2380,171 @@ pipeline = ScannerPipeline()
 # CLIENTE CONECTOR IQ OPTION CON SINCRONIZACIÓN BIPLANA
 # ==========================================================
 class IQClient:
+    """Cliente ÚNICO hacia IQ Option.
+
+    Se crea una sola instancia de IQ_Option durante toda la vida del proceso: la
+    versión anterior creaba una instancia nueva en cada reintento (el log de
+    errores acumuló 199 objetos IQ_Option y 199 websockets abandonados). La
+    propia librería ya cierra el socket anterior al reconectar.
+    """
+
     def __init__(self):
         self.api = None
         self.connected = False
-        self._candle_executor = ThreadPoolExecutor(max_workers=5)
+        self.session_gen = 0            # sube en cada reconexión correcta
+        self.last_connect_attempt = 0.0
+        self.connect_failures = 0
+        # Pool EXCLUSIVO para el histórico de velas: nunca se comparte con los
+        # streams (compartirlo fue lo que agotó los hilos y dejó todo en NO_DATA).
+        self._history_executor = ThreadPoolExecutor(max_workers=4,
+                                                    thread_name_prefix="iq-hist")
+        self._stream_executor = ThreadPoolExecutor(max_workers=2,
+                                                   thread_name_prefix="iq-strm")
+
+    def _ensure_client(self):
+        if self.api is None:
+            self.api = IQ_Option(IQ_EMAIL, IQ_PASSWORD)
+        return self.api
 
     def connect(self):
         if not IQ_AVAILABLE or not IQ_EMAIL or not IQ_PASSWORD:
-            log.error("❌ Credenciales ausentes en el entorno local.")
+            log.error("❌ Credenciales ausentes en el entorno local (.env).")
             return False
+        with IQ_ABANDONED_LOCK:
+            if IQ_ABANDONED_CALLS >= IQ_ABANDONED_MAX:
+                log.error("[IQ] Hay llamadas de la librería colgadas de forma "
+                          "permanente; no se reconecta para no degradar el equipo.")
+                return False
+        self.last_connect_attempt = time.time()
         try:
-            log.info(f"[IQ] Intentando conectar a IQ Option con: {IQ_EMAIL}...")
-            self.api = IQ_Option(IQ_EMAIL, IQ_PASSWORD)
-            ok, reason = self.api.connect()
+            log.info(f"[IQ] Conectando a IQ Option con {IQ_EMAIL} (modo {IQ_MODE})...")
+            client = self._ensure_client()
+            ok, reason = call_with_timeout(client.connect, IQ_CONNECT_TIMEOUT)
             if not ok:
+                self.connected = False
+                self.connect_failures += 1
                 log.error(f"❌ Falló el apretón de manos con el bróker: {reason}")
                 return False
-            self.api.change_balance(IQ_MODE)
-            time.sleep(2)
+            # change_balance() también espera el perfil con un bucle vacío.
+            try:
+                call_with_timeout(client.change_balance, 30, IQ_MODE)
+            except Exception as exc:
+                log.warning(f"[IQ] change_balance({IQ_MODE}) no confirmó: {exc}")
             self.connected = True
-            log.info(f"✅ IQ Option enlazado correctamente al entorno: {IQ_MODE}")
-
+            self.connect_failures = 0
+            self.session_gen += 1
+            log.info(f"✅ IQ Option enlazado al entorno {IQ_MODE} (sesión #{self.session_gen}).")
             self.sync_clock()
             return True
-        except Exception as e:
-            log.error(f"❌ Excepción crítica al conectar: {e}")
+        except BaseException as e:
+            # BaseException a propósito: la librería puede lanzar SystemExit
+            # (exit(1)) si el tipo de cuenta no es REAL/PRACTICE/TOURNAMENT.
             self.connected = False
+            self.connect_failures += 1
+            log.error(f"❌ Excepción crítica al conectar: {type(e).__name__}: {e}")
             return False
 
     def sync_clock(self):
-        if self.is_connected():
+        """Sincroniza con el reloj del broker promediando DOS muestras.
+
+        Una sola medición arrastra la latencia de red puntual (medido con
+        diagnostico_broker.py: dos lecturas separadas 0,3 s dieron +1,058 s y
+        +0,758 s). El promedio reduce ese ruido, y el valor resultante sigue
+        pasando por la validación de BrokerClock: si no es creíble se descarta y
+        se mantiene el reloj local, en lugar de aceptar un valor envenenado."""
+        if not self.connected or self.api is None:
+            return
+        offsets = []
+        for i in range(max(1, CLOCK_SAMPLES)):
             try:
-                server_ts = self.api.get_server_timestamp()
-                if server_ts and isinstance(server_ts, (int, float)):
-                    broker_clock.sync_with_broker(float(server_ts))
+                ts = call_with_timeout(self.api.get_server_timestamp, 5)
+                offsets.append(float(ts) - time.time())
+            except (TypeError, ValueError):
+                pass
             except Exception as e:
-                log.warning(f"⚠️ Error obteniendo server timestamp de IQ Option: {e}")
+                log.debug(f"[CLOCK] server timestamp no disponible: {e}")
+                break
+            if i < CLOCK_SAMPLES - 1:
+                time.sleep(CLOCK_SAMPLE_GAP)
+        if not offsets:
+            return
+        broker_clock.sync_with_broker(time.time() + (sum(offsets) / len(offsets)))
 
     def rebuild(self):
-        """Renueva la sesión IQ desde cero. Útil cuando get_all_init_v2 deja de
-        responder aunque el socket parezca 'vivo' (fallo conocido de la librería
-        en sesiones largas). No debe llamarse con streams en mitad de ciclo."""
+        """Renueva la sesión IQ desde cero reutilizando el mismo objeto
+        IQ_Option (la librería cierra el socket anterior internamente)."""
         try:
             if self.api is not None:
-                try:
-                    self.api.disconnect()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        self.api = None
-        self.connected = False
+                inner = getattr(self.api, "api", None)
+                closer = getattr(inner, "close", None) if inner is not None else None
+                if callable(closer):
+                    try:
+                        closer()
+                    except Exception:
+                        pass
+        finally:
+            self.connected = False
+            broker_clock.reset_to_local()
         return self.connect()
 
     def is_connected(self):
-        if self.api:
-            try:
-                if not self.api.check_connect():
-                    self.connected = False
-            except Exception:
-                self.connected = False
-        else:
+        if self.api is None:
             self.connected = False
-        return self.connected
+            return False
+        try:
+            alive = bool(self.api.check_connect())
+        except Exception:
+            alive = False
+        if not alive:
+            self.connected = False
+            broker_clock.reset_to_local()
+        return self.connected and alive
+
+    @staticmethod
+    def _to_candles(raw):
+        if not raw or not isinstance(raw, list):
+            return None
+        res = []
+        for c in raw:
+            if isinstance(c, dict) and "from" in c:
+                try:
+                    res.append(Candle(
+                        timestamp=int(c["from"]),
+                        open=float(c["open"]),
+                        high=float(c["max"]),
+                        low=float(c["min"]),
+                        close=float(c["close"]),
+                        volume=float(c.get("volume") or 0.0)
+                    ))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        return res or None
 
     def get_candles(self, asset, interval=60, count=100, end_time=None):
-        if self.is_connected():
-            try:
-                end = end_time if end_time else int(broker_clock.now_ts())
-                future = self._candle_executor.submit(self.api.get_candles, asset, interval, count, end)
-                raw = future.result(timeout=5)
-                if raw and isinstance(raw, list):
-                    res = []
-                    for c in raw:
-                        if isinstance(c, dict) and "from" in c:
-                            res.append(
-                                Candle(
-                                    timestamp=c["from"],
-                                    open=float(c["open"]),
-                                    high=float(c["max"]),
-                                    low=float(c["min"]),
-                                    close=float(c["close"]),
-                                    volume=float(c["volume"])
-                                )
-                            )
-                    return res
-            except Exception as e:
-                log.debug(f"Retraso o lectura nula de velas para {asset}: {e}")
-        return None
+        """Histórico de velas con timeout DURO.
+
+        La librería parcheada ya no puede quedarse girando sin fin, pero se
+        añade una segunda red de seguridad: pool dedicado + timeout explícito.
+        Antes, un timeout dejaba el hilo ocupado para siempre en el mismo pool
+        que usaban los streams, y a la quinta vez TODO el escáner quedaba en
+        NO_DATA de forma irreversible."""
+        if self.api is None or not self.connected:
+            return None
+        end = int(end_time) if end_time else int(time.time())
+        future = None
+        try:
+            future = self._history_executor.submit(
+                self.api.get_candles, asset, interval, count, end)
+            raw = future.result(timeout=IQ_CANDLE_TIMEOUT + 4)
+        except Exception as e:
+            log.debug(f"[IQ] lectura de velas fallida para {asset}: {e}")
+            if future is not None:
+                try:
+                    future.cancel()
+                except Exception:
+                    pass
+            return None
+        return self._to_candles(raw)
 
 iq = IQClient()
 
@@ -1553,22 +2559,32 @@ class CandleStreamManager:
         self.lock = threading.Lock()
         self.streams = set()
         self._stop = threading.Event()
+        self._session_gen = -1
 
     def start(self, asset) -> bool:
+        if iq.api is None:
+            return False
         try:
-            fut = iq._candle_executor.submit(iq.api.start_candles_stream, asset, self.SIZE, self.MAXDICT)
-            fut.result(timeout=25)
-            with self.lock:
-                self.streams.add(asset)
-            log.info(f"[STREAM] iniciado para {asset}")
-            return True
+            fut = iq._stream_executor.submit(
+                iq.api.start_candles_stream, asset, self.SIZE, self.MAXDICT)
+            # El parche de la librería acota la espera a IQ_STREAM_TIMEOUT,
+            # así que este timeout sólo es una red de seguridad adicional.
+            ok = fut.result(timeout=IQ_STREAM_TIMEOUT + 20)
         except Exception as e:
             log.warning(f"[STREAM] no se pudo iniciar stream {asset}: {e}")
             return False
+        if not ok:
+            log.warning(f"[STREAM] el broker no confirmó el stream de {asset}")
+            return False
+        with self.lock:
+            self.streams.add(asset)
+        log.info(f"[STREAM] stream activo para {asset}")
+        return True
 
     def stop(self, asset):
         try:
-            iq.api.stop_candles_stream(asset, self.SIZE)
+            if iq.api is not None:
+                iq.api.stop_candles_stream(asset, self.SIZE)
         except Exception:
             pass
         with self.lock:
@@ -1589,6 +2605,8 @@ class CandleStreamManager:
             pass
 
     def get_realtime(self, asset):
+        if iq.api is None:
+            return None
         try:
             data = iq.api.get_realtime_candles(asset, self.SIZE)
         except Exception:
@@ -1596,24 +2614,32 @@ class CandleStreamManager:
         if not isinstance(data, dict) or not data:
             return None
         res = []
-        for _ts, c in sorted(data.items()):
+        for _ts, c in sorted(data.items(), key=lambda kv: str(kv[0])):
             if isinstance(c, dict) and "from" in c:
                 try:
                     res.append(Candle(
-                        timestamp=c["from"],
+                        timestamp=int(c["from"]),
                         open=float(c["open"]),
                         high=float(c["max"]),
                         low=float(c["min"]),
                         close=float(c["close"]),
-                        volume=float(c["volume"])
+                        volume=float(c.get("volume") or 0.0)
                     ))
-                except Exception:
+                except (KeyError, TypeError, ValueError):
                     continue
         return res or None
 
     def active_count(self):
         with self.lock:
             return len(self.streams)
+
+    def is_streaming(self, asset) -> bool:
+        with self.lock:
+            return asset in self.streams
+
+    def snapshot(self) -> list:
+        with self.lock:
+            return sorted(self.streams)
 
     def reconcile(self, desired):
         with self.lock:
@@ -1626,6 +2652,14 @@ class CandleStreamManager:
     def run(self):
         while not self._stop.is_set():
             try:
+                # Tras una reconexión los streams anteriores ya no existen en el
+                # socket nuevo: hay que volver a suscribirlos todos.
+                if iq.session_gen != self._session_gen:
+                    if self._session_gen != -1:
+                        log.info("[STREAM] Reconexión detectada: re-suscribiendo streams...")
+                    self._session_gen = iq.session_gen
+                    with self.lock:
+                        self.streams.clear()
                 if iq.is_connected() and broker_market.valid():
                     desired = set(asset_manager.all_tradable())
                     self.reconcile(desired)
@@ -1643,14 +2677,29 @@ candle_streams = CandleStreamManager()
 # NINGÚN hilo reconecte simultáneamente ni cree varios clientes IQ.
 CONN_LOCK = threading.Lock()
 BROKER_STATUS = "DISCONNECTED"   # CONNECTED / DISCONNECTED
+CONN_BACKOFF_START = 5.0
+CONN_BACKOFF_MAX = 180.0
+_conn_backoff = CONN_BACKOFF_START
+_next_connect_at = 0.0
 
 
-def ensure_connected() -> bool:
-    """Reconexión centralizada y controlada. Devuelve True si hay sesión."""
-    global BROKER_STATUS
+def ensure_connected(force: bool = False) -> bool:
+    """Reconexión centralizada y controlada, con espera exponencial.
+
+    Antes CADA pasada del bucle (cada 0,5 s) lanzaba un intento de conexión
+    nuevo: el log de errores acumuló 199 "Excepción crítica al conectar" y 199
+    clientes IQ abandonados (cada uno con su websocket). Ahora los reintentos se
+    espacian de 5 s hasta 3 minutos."""
+    global BROKER_STATUS, _conn_backoff, _next_connect_at
     if iq.is_connected():
         BROKER_STATUS = "CONNECTED"
+        _conn_backoff = CONN_BACKOFF_START
+        _next_connect_at = 0.0
         return True
+    now = time.time()
+    if not force and now < _next_connect_at:
+        BROKER_STATUS = "DISCONNECTED"
+        return False
     if not CONN_LOCK.acquire(blocking=False):
         # Otro hilo ya está reconectando: esperar, no duplicar.
         return False
@@ -1658,11 +2707,19 @@ def ensure_connected() -> bool:
         BROKER_STATUS = "DISCONNECTED"
         if iq.connect():
             BROKER_STATUS = "CONNECTED"
+            _conn_backoff = CONN_BACKOFF_START
+            _next_connect_at = 0.0
             return True
+        _next_connect_at = time.time() + _conn_backoff
+        log.warning(f"[CONN] Nuevo intento de conexión en {_conn_backoff:.0f}s "
+                    f"(fallos acumulados: {iq.connect_failures}).")
+        _conn_backoff = min(_conn_backoff * 2, CONN_BACKOFF_MAX)
         return False
-    except Exception as e:
-        log.error(f"[CONN] Error en reconexión: {e}")
+    except BaseException as e:
+        log.error(f"[CONN] Error en reconexión: {type(e).__name__}: {e}")
         BROKER_STATUS = "DISCONNECTED"
+        _next_connect_at = time.time() + _conn_backoff
+        _conn_backoff = min(_conn_backoff * 2, CONN_BACKOFF_MAX)
         return False
     finally:
         CONN_LOCK.release()
@@ -1681,18 +2738,32 @@ class BrokerMarketState:
         self.updated_at = 0
         self.last_error = ""
         self.fail_count = 0          # refrescos fallidos consecutivos
+        # Un único hilo para el catálogo. OJO: antes se usaba
+        # 'with ThreadPoolExecutor(...)' y su shutdown(wait=True) esperaba al
+        # hilo colgado, anulando el timeout de 45 s: el refresco del catálogo
+        # podía quedarse bloqueado para siempre.
+        self._executor = ThreadPoolExecutor(max_workers=1,
+                                            thread_name_prefix="iq-init")
         # Tolerancia: si un refresco del catálogo falla de forma transitoria
         # (STALE), seguimos usando el último snapshot conocido durante esta
         # ventana en lugar de cerrar TODO el mercado.
         self.stale_grace = 600.0
 
     def refresh(self):
+        if iq.api is None:
+            self._mark_stale("cliente IQ no inicializado")
+            return
+        future = None
         try:
-            import concurrent.futures as _cf
-            with _cf.ThreadPoolExecutor(max_workers=1) as ex:
-                data = ex.submit(iq.api.get_all_init_v2).result(timeout=45)
+            future = self._executor.submit(iq.api.get_all_init_v2)
+            data = future.result(timeout=IQ_INIT_TIMEOUT + 10)
         except Exception as e:
-            self._mark_stale(str(e))
+            if future is not None:
+                try:
+                    future.cancel()      # nunca esperar al hilo: puede estar colgado
+                except Exception:
+                    pass
+            self._mark_stale(f"{type(e).__name__}: {e}")
             return
         if not isinstance(data, dict):
             self._mark_stale("get_all_init_v2 no devolvió un diccionario")
@@ -1863,11 +2934,15 @@ def run_broker_diagnostic():
 def _broker_state_worker():
     # Primer refresco al conectar; luego frecuencia CONTROLADA (no por ciclo).
     time.sleep(3)
-    broker_market.refresh()
+    if iq.is_connected():
+        broker_market.refresh()
     if BROKER_DIAGNOSTIC:
         run_broker_diagnostic()
     while True:
         time.sleep(120)
+        # Sin sesión el catálogo no puede responder: no gastar 35 s esperando.
+        if not iq.is_connected():
+            continue
         broker_market.refresh()
 
 # ==========================================================
@@ -1879,41 +2954,57 @@ class ScanController:
         self.cycles = 0
         self.scan_time = 0
         self.last_processed_minute = -1
-        self.last_market_refresh = 0
-        self.last_clock_sync = 0
+        self.last_market_refresh = 0.0
+        self.last_clock_sync = 0.0
+        self._last_live_refresh = 0.0
+        self._zero_tradable_streak = 0
+        self._last_session_recovery = 0.0
+        # Latido del bucle: lo vigila WatchdogWorker DESDE FUERA (un vigilante
+        # dentro del propio bucle no sirve de nada si el bucle se bloquea).
+        self.last_heartbeat = time.time()
+        self.last_cycle_ts = 0.0
+        self.last_warn_ts = 0.0
 
     def execute(self):
-        now_ts = broker_clock.now_ts()
+        """Una pasada del bucle. REGLA DE ORO: aquí NO se hace trabajo de red.
+
+        Antes este método llamaba a refresh_market_sessions(), que pide el
+        histórico de hasta 40 activos por la conexión compartida. Cuando eso
+        tardaba (arranque, reconexión, rollover) el bucle quedaba bloqueado
+        decenas de segundos o minutos: el panel se congelaba y los ciclos dejaban
+        de contarse ("el scanner se detiene solo"). Ahora todo el trabajo de red
+        vive en hilos propios (MarketRefreshWorker / CandleStreamManager) y aquí
+        sólo se leen caché y streams, que son operaciones locales e inmediatas.
+        """
+        self.last_heartbeat = time.time()
+        now_local = self.last_heartbeat
 
         if not iq.is_connected():
-            log.warning("[RECONEXIÓN] Canal WebSocket cerrado. Re-enlazando...")
-            if not ensure_connected():
-                return
-            market_feed.refresh_market_sessions()
+            # La reconexión puede tardar hasta 60 s (handshake + cambio de
+            # balance), así que la hace ConnectionWorker en su propio hilo. Aquí
+            # sólo se deja constancia y se sale sin bloquear el bucle.
+            self.last_cycle_ts = now_local
             return
 
-        # Sincronizar el reloj con moderación (el endpoint varía +/-1 s y no se
-        # necesita 2 veces por segundo). Se resincroniza también al reconectar.
-        if now_ts - self.last_clock_sync >= 30:
+        # El reloj del broker se lee de un valor ya recibido por el websocket
+        # (no es una petición de red), así que no puede bloquear el bucle.
+        if now_local - self.last_clock_sync >= CLOCK_SYNC_INTERVAL:
             iq.sync_clock()
-            self.last_clock_sync = now_ts
+            self.last_clock_sync = now_local
 
-        if now_ts - self.last_market_refresh >= 60:
-            log.info("[MARKET] Ejecutando refresco dinámico de sesiones de mercado...")
-            market_feed.refresh_market_sessions()
-            self.last_market_refresh = now_ts
-
+        now_ts = broker_clock.now_ts()
         current_minute = int(now_ts) // 60
         if current_minute == self.last_processed_minute:
             # TABLERO EN VIVO: aunque no haya vela nueva, refrescar el %/valores
             # cada ~4 s con la vela que se está formando (solo visual, no afecta
             # a las señales, que solo se disparan con velas CERRADAS).
-            if now_ts - getattr(self, "_last_live_refresh", 0) >= 4:
-                self._last_live_refresh = now_ts
+            if now_local - self._last_live_refresh >= 4:
+                self._last_live_refresh = now_local
                 try:
                     self.refresh_proximity_live()
                 except Exception as e:
                     log.debug(f"[LIVE] error refresco en vivo: {e}")
+            self.last_cycle_ts = now_local
             return
 
         start = time.perf_counter()
@@ -1925,8 +3016,30 @@ class ScanController:
         self.cycles = scan_metrics.cycles
         self.last_processed_minute = current_minute
         self.scan_time = round(time.perf_counter() - start, 3)
+        self.last_cycle_ts = now_local
 
         log.info(f"[SCANNER] Ciclo #{self.cycles} completado en {self.scan_time}s | Activos vivos: {len(market_feed.active_assets())}")
+
+    def _check_degraded_session(self, now_local):
+        """Sesión 'degradada': el broker responde (catálogo LIVE) pero NINGÚN
+        activo entrega velas. Es el síntoma exacto del fallo anterior; en vez de
+        esperar indefinidamente se renueva la sesión (con enfriamiento)."""
+        if not broker_market.valid():
+            self._zero_tradable_streak = 0
+            return
+        if asset_manager.all_tradable():
+            self._zero_tradable_streak = 0
+            return
+        self._zero_tradable_streak += 1
+        if self._zero_tradable_streak < 3:
+            return
+        if now_local - self._last_session_recovery < 300:
+            return
+        self._last_session_recovery = now_local
+        self._zero_tradable_streak = 0
+        log.warning("[MARKET] 3 refrescos seguidos sin ningún activo con velas. "
+                    "Renovando la sesión con el broker...")
+        threading.Thread(target=_recover_iq_session, daemon=True).start()
 
     def refresh_proximity_live(self):
         """Refresco SOLO visual del tablero: recalcula los indicadores con la vela
@@ -1958,6 +3071,186 @@ class ScanController:
             time.sleep(0.5)
 
 scan_controller = ScanController()
+
+# ==========================================================
+# HILOS DE SERVICIO: refresco de mercado y vigilante del bucle
+# ==========================================================
+class MarketRefreshWorker:
+    """Revalida el universo con el broker en su PROPIO hilo.
+
+    Incluye lecturas al broker (histórico de velas) que pueden tardar decenas de
+    segundos. Al sacarlas del bucle del escáner, por muy lento que esté el
+    broker los ciclos siguen avanzando y el panel no se congela."""
+
+    def __init__(self):
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self.last_run = 0.0
+        self.last_duration = 0.0
+        self.runs = 0
+
+    def wake(self):
+        """Pide un refresco inmediato (p. ej. tras reconectar)."""
+        self._wake.set()
+
+    def run(self):
+        # Pequeña espera inicial: deja que el catálogo del broker llegue.
+        self._stop.wait(3)
+        while not self._stop.is_set():
+            espera = MARKET_REFRESH_INTERVAL
+            if self._wake.is_set():
+                self._wake.clear()
+                espera = 0.0
+            try:
+                if not iq.is_connected():
+                    espera = 5.0
+                elif not broker_market.valid():
+                    # El catálogo del broker todavía no ha llegado: reintentar pronto
+                    # en lugar de esperar un minuto entero con el escáner a ciegas.
+                    espera = 5.0
+                else:
+                    inicio = time.perf_counter()
+                    market_feed.refresh_market_sessions()
+                    self.last_duration = time.perf_counter() - inicio
+                    self.last_run = time.time()
+                    self.runs += 1
+                    scan_controller.last_market_refresh = self.last_run
+                    scan_controller._check_degraded_session(self.last_run)
+                    if self.last_duration > 30:
+                        # No es un problema de escaneo (corre aparte), pero conviene
+                        # saberlo: significa que el broker está lento.
+                        log.warning(f"[MARKET] El refresco de sesiones tardó "
+                                    f"{self.last_duration:.1f}s (no afecta al escaneo: "
+                                    f"corre en su propio hilo).")
+            except Exception as e:
+                log.error(f"[MARKET] Error en el refresco de sesiones: {e}")
+            self._stop.wait(max(5.0, espera))
+
+
+market_refresh_worker = MarketRefreshWorker()
+
+
+class ConnectionWorker:
+    """Mantiene viva la sesión con el broker, fuera del bucle del escáner.
+
+    `ensure_connected()` puede tardar hasta 60 s (handshake + change_balance), de
+    modo que llamarlo desde el bucle lo bloqueaba. Aquí se reintenta cada 5 s y la
+    propia espera exponencial de `ensure_connected()` evita martillear al broker.
+    """
+
+    def __init__(self):
+        self._stop = threading.Event()
+        self.reconnects = 0
+
+    def run(self):
+        while not self._stop.is_set():
+            try:
+                if not iq.is_connected():
+                    if ensure_connected():
+                        self.reconnects += 1
+                        log.info("[CONN] Sesión restablecida por el hilo de conexión; "
+                                 "se pide un refresco de mercado.")
+                        market_refresh_worker.wake()
+            except Exception as e:
+                log.error(f"[CONN] Error en el hilo de conexión: {e}")
+            self._stop.wait(5)
+
+
+connection_worker = ConnectionWorker()
+
+
+class WatchdogWorker:
+    """Vigila DESDE FUERA que el bucle del escáner siga latiendo.
+
+    Un vigilante dentro del propio bucle no sirve: si el bucle se bloquea, el
+    vigilante se bloquea con él. Este hilo avisa en el log y, si el parón
+    persiste, renueva la sesión con el broker."""
+
+    def __init__(self):
+        self._stop = threading.Event()
+        self.started_at = time.time()
+        self._last_log = 0.0
+        self._last_hb_log = time.time()
+
+    def status(self) -> dict:
+        ahora = time.time()
+        parado = ahora - scan_controller.last_heartbeat
+        sin_ciclo = ahora - (scan_controller.last_cycle_ts or ahora)
+        if parado > STALL_RECOVER:
+            salud = "ATASCADO"
+        elif parado > STALL_WARN or sin_ciclo > STALL_WARN:
+            salud = "DEGRADADO"
+        else:
+            salud = "OK"
+        _app = _estado_app()
+        return {
+            "salud": salud,
+            "uptime_s": round(ahora - self.started_at, 1),
+            "latido_hace_s": round(parado, 1),
+            "ultimo_ciclo_hace_s": round(sin_ciclo, 1),
+            "ciclos": scan_controller.cycles,
+            "activos_vivos": len(market_feed.active_assets()),
+            "activos_operables": len(asset_manager.all_tradable()),
+            "streams": candle_streams.active_count(),
+            "broker": BROKER_STATUS,
+            "disponibilidad": broker_market.status,
+            "llamadas_colgadas": IQ_ABANDONED_CALLS,
+            "refresco_mercado_hace_s": (round(ahora - market_refresh_worker.last_run, 1)
+                                        if market_refresh_worker.last_run else None),
+            "refresco_mercado_s": round(market_refresh_worker.last_duration, 2),
+            # Diagnóstico ampliado (auditoría): memoria del historial de patrones,
+            # oscilación de activos y estado de las integraciones.
+            "pattern_history_size": len(pattern_history),
+            "pattern_history_max": PATTERN_HISTORY_MAX,
+            "stale_streak_max": max(market_feed._stale_streak.values(), default=0),
+            "stale_tolerance": STALE_TOLERANCE,
+            # Publicación de señales en Alí Binary Options
+            "app_status": _app["state"],
+            "app_detail": _app["detail"],
+            "app_signal_url_configurada": bool(APP_SIGNAL_URL),
+            "firestore_directo_configurado": bool(FIREBASE_SA_PATH),
+            "ws_auth": bool(WS_AUTH_TOKEN),
+            "indicators_engine": INDICATORS_ENGINE,
+            "log_file": LOG_FILE,
+        }
+
+    def run(self):
+        while not self._stop.is_set():
+            self._stop.wait(15)
+            ahora = time.time()
+            parado = ahora - scan_controller.last_heartbeat
+
+            # Latido informativo: deja constancia en el log de que sigue vivo y
+            # con qué salud, para poder verlo sin abrir el panel.
+            if ahora - self._last_hb_log > HEARTBEAT_LOG:
+                self._last_hb_log = ahora
+                st = self.status()
+                log.info(f"[WATCHDOG] {st['salud']} | ciclos={st['ciclos']} | "
+                         f"activos={st['activos_vivos']} | streams={st['streams']} | "
+                         f"broker={st['broker']} | APP={st['app_status']} | "
+                         f"refresco_mercado_cada={st['refresco_mercado_s']}s")
+
+            if parado <= STALL_WARN:
+                continue
+            if ahora - self._last_log > 60:
+                self._last_log = ahora
+                log.warning("[WATCHDOG] El bucle del escáner lleva "
+                            f"{parado:.0f}s sin dar señales de vida "
+                            f"(activos: {len(market_feed.active_assets())}, "
+                            f"streams: {candle_streams.active_count()}, "
+                            f"broker: {BROKER_STATUS}, "
+                            f"llamadas colgadas: {IQ_ABANDONED_CALLS}). "
+                            "El trabajo de red corre en hilos aparte, así que esto "
+                            "no debería ocurrir; se está recopilando el estado.")
+            if (parado > STALL_RECOVER
+                    and ahora - scan_controller._last_session_recovery > 300):
+                scan_controller._last_session_recovery = ahora
+                log.error(f"[WATCHDOG] Parón de {parado:.0f}s: renovando la sesión "
+                          "con el broker para recuperar el escaneo...")
+                threading.Thread(target=_recover_iq_session, daemon=True).start()
+
+
+watchdog_worker = WatchdogWorker()
 
 # ==========================================================
 # INTERFAZ WEB PREMIUM CON MONITOR EN VIVO DE RELOJ
@@ -2019,6 +3312,7 @@ HTML = """
   .progress-bg { flex: 1; height: 6px; background: #1e2330; border-radius: 3px; overflow: hidden; }
   .progress-bar { height: 100%; background: linear-gradient(90deg, #1f6feb, #00ff88); }
   .reason-tag { color: #ffbc5e; background: rgba(255,188,94,0.07); padding: 3px 8px; border-radius: 4px; font-size: 11px; }
+  .cond-tag { font-weight: 700; color: #ffbc5e; }
 
   .metric-item { margin-bottom: 18px; border-bottom: 1px solid #1c2130; padding-bottom: 14px; }
   .metric-label { font-size: 12px; color: #8b949e; margin-bottom: 6px; text-transform: uppercase; }
@@ -2033,6 +3327,7 @@ HTML = """
     <span class="logo-text">AppALÍ PRO</span>
     <span class="logo-sub">GSR SCANNER</span>
   </div>
+  <div class="version-tag" id="app_badge" title="Estado de la publicación de señales en Ali Binary Options">APP …</div>
   <div class="version-tag">PROD v7.5</div>
 </header>
 
@@ -2072,12 +3367,13 @@ HTML = """
             <th>BB</th>
             <th>RSI</th>
             <th>DAMOA</th>
-            <th>Progreso GSR</th>
+            <th title="Cuántas de las 3 condiciones GSR (BB, RSI, DAMOA) se cumplen AHORA. NO es una señal: la señal exige el patrón secuencial completo.">Cond.</th>
+            <th title="Avance del PATRÓN GSR: 0% observando · 25% 1ª vela · 50% 2ª vela · 100% patrón validado (LISTA). Es distinto de las condiciones.">Avance Patrón</th>
             <th>Filtro Faltante</th>
           </tr>
         </thead>
         <tbody id="proximity_v2_board">
-          <tr><td colspan="8" style="text-align:center; color:#8b949e; padding: 30px;">Sincronizando feed de activos reales...</td></tr>
+          <tr><td colspan="9" style="text-align:center; color:#8b949e; padding: 30px;">Sincronizando feed de activos reales...</td></tr>
         </tbody>
       </table>
     </div>
@@ -2105,6 +3401,14 @@ HTML = """
       <div class="metric-item">
         <div class="metric-label">Streams Activos</div>
         <div class="metric-value" id="val_streams" style="color: #06b6d4;">0</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">1 min disponibles</div>
+        <div class="metric-value" id="val_1min" style="color: #00ff88;">0</div>
+      </div>
+      <div class="metric-item">
+        <div class="metric-label">Descartados sin 1 min</div>
+        <div class="metric-value" id="val_no1min" style="color: #8b949e;">0</div>
       </div>
 
       <h3 style="margin-top:25px;">🔌 Estados del Sistema</h3>
@@ -2143,7 +3447,8 @@ HTML = """
 </div>
 
 <script>
-let ws = new WebSocket("ws://" + location.host + "/ws");
+let WS_TOKEN = "__WS_TOKEN__";
+let ws = new WebSocket("ws://" + location.host + "/ws" + (WS_TOKEN ? "?token=" + encodeURIComponent(WS_TOKEN) : ""));
 
 /* ===== Alerta sonora / visual de señales ===== */
 let audioCtx = null;
@@ -2260,6 +3565,8 @@ ws.onmessage = (event) => {
     document.getElementById('val_closed').innerText = d.status.closed + d.status.no_data;
     document.getElementById('val_stale').innerText = d.status.stale;
     document.getElementById('val_streams').innerText = d.status.streams_active;
+    document.getElementById('val_1min').innerText = d.status.assets_1min;
+    document.getElementById('val_no1min').innerText = d.status.assets_no_1min;
 
     document.getElementById('st_broker').innerText = d.status.broker;
     document.getElementById('st_availability').innerText = d.status.availability;
@@ -2269,6 +3576,18 @@ ws.onmessage = (event) => {
     document.getElementById('val_cycles').innerText = d.status.cycles;
     document.getElementById('val_timer').innerHTML = d.status.next_candle + "<span>s</span>";
     document.getElementById('val_avg_latency').innerText = d.status.avg_latency;
+
+    /* ===== Aviso de publicación en Ali Binary Options ===== */
+    const app = document.getElementById('app_badge');
+    if (app) {
+        const st = d.status.app_status || 'OFF';
+        app.innerText = st === 'ON' ? 'APP ON' : 'APP OFF';
+        app.style.background = st === 'ON' ? 'rgba(63,185,80,0.15)' : 'rgba(245,158,11,0.18)';
+        app.style.color = st === 'ON' ? '#3fb950' : '#f59e0b';
+        app.style.borderColor = st === 'ON' ? 'rgba(63,185,80,0.35)' : 'rgba(245,158,11,0.4)';
+        app.title = (d.status.app_detail || '') +
+            (st === 'ON' ? '' : ' — las señales NO se están publicando en la app');
+    }
 
     const board = document.getElementById('proximity_v2_board');
     board.innerHTML = '';
@@ -2291,6 +3610,7 @@ ws.onmessage = (event) => {
               <td>${row.bb_ok ? "🟢" : "🔴"}</td>
               <td>${row.rsi_ok ? "🟢" : "🔴"}</td>
               <td>${row.damoa_ok ? "🟢" : "🔴"}</td>
+              <td><span class="cond-tag" title="Condiciones cumplidas ahora (BB/RSI/DAMOA)">${row.conditions_met || 0}/${row.conditions_total || 3}</span></td>
               <td>
                 <div class="progress-wrapper">
                   <div class="progress-bg"><div class="progress-bar" style="width:${row.progress}%"></div></div>
@@ -2308,7 +3628,7 @@ ws.onmessage = (event) => {
         } else {
             emptyMsg = "Sin instrumentos monitoreados en este instante (reconectando al broker). Se reintenta automáticamente.";
         }
-        board.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#8b949e; padding: 30px;">' + emptyMsg + '</td></tr>';
+        board.innerHTML = '<tr><td colspan="9" style="text-align:center; color:#8b949e; padding: 30px;">' + emptyMsg + '</td></tr>';
     }
 };
 </script>
@@ -2353,6 +3673,10 @@ class Application:
                         "no_data": scan_metrics.no_data_count,
                         "stale": _count_stale(),
                         "streams_active": candle_streams.active_count(),
+                        "assets_1min": scan_metrics.assets_1min,
+                        "assets_no_1min": scan_metrics.assets_no_1min,
+                        "app_status": _estado_app()["state"],
+                        "app_detail": _estado_app()["detail"],
                         "avg_latency": f"{scan_metrics.avg_latency_per_asset * 1000:.1f}ms",
                         "broker": BROKER_STATUS,
                         "availability": broker_market.status,
@@ -2390,15 +3714,59 @@ def _candles_state():
     return "STALE"
 
 def iq_login_worker():
+    log.info("=" * 60)
+    log.info(f"INICIO DEL ESCÁNER · {APP_NAME} {VERSION} · cuenta {IQ_MODE} · "
+             f"puerto {PORT} · pid {os.getpid()}")
+    log.info("=" * 60)
     try:
         ensure_connected()
     except Exception as e:
         log.error(f"Error durante la inicialización de sesión con el broker: {e}")
     finally:
-        market_feed.refresh_market_sessions()
-        threading.Thread(target=_broker_state_worker, daemon=True).start()
-        threading.Thread(target=candle_streams.run, daemon=True).start()
+        # Hilos de servicio, cada uno con una única responsabilidad. El bucle del
+        # escáner NO hace trabajo de red: sólo lee caché y streams.
+        threading.Thread(target=_broker_state_worker, daemon=True,
+                         name="broker-state").start()
+        threading.Thread(target=candle_streams.run, daemon=True,
+                         name="candle-streams").start()
+        threading.Thread(target=connection_worker.run, daemon=True,
+                         name="connection").start()
+        threading.Thread(target=market_refresh_worker.run, daemon=True,
+                         name="market-refresh").start()
+        threading.Thread(target=watchdog_worker.run, daemon=True,
+                         name="watchdog").start()
         APP.start_scanner()
+
+def _acceso_permitido(scope, cliente) -> bool:
+    """Control de acceso del panel, del WebSocket y de la API.
+
+    - Sin WS_AUTH_TOKEN: todo permitido (modo desarrollo, como hasta ahora).
+    - Con token: se exige `?token=...` en la URL o la cabecera `X-Auth-Token`.
+    - Desde el propio equipo (127.0.0.1 / ::1) se permite siempre: así un token
+      olvidado nunca te deja fuera de tu panel, pero cualquier OTRO equipo de la
+      red sí necesita el token (el servidor escucha en 0.0.0.0).
+    """
+    if not WS_AUTH_TOKEN:
+        return True
+    if cliente in ("127.0.0.1", "::1", "localhost"):
+        return True
+    try:
+        from urllib.parse import unquote
+        qs = scope.get("query_string") or b""
+        for parte in qs.decode("utf-8", "ignore").split("&"):
+            if parte.startswith("token=") and unquote(parte[6:]) == WS_AUTH_TOKEN:
+                return True
+    except Exception:
+        pass
+    for clave, valor in (scope.get("headers") or []):
+        if clave.lower() == b"x-auth-token":
+            try:
+                if valor.decode("utf-8", "ignore").strip() == WS_AUTH_TOKEN:
+                    return True
+            except Exception:
+                pass
+    return False
+
 
 async def app(scope, receive, send):
     if scope['type'] == 'lifespan':
@@ -2414,18 +3782,44 @@ async def app(scope, receive, send):
 
     if scope['type'] == 'http':
         path = scope['path']
+        cliente = (scope.get('client') or [None])[0]
+        if not _acceso_permitido(scope, cliente):
+            await send({
+                'type': 'http.response.start',
+                'status': 401,
+                'headers': [[b'content-type', b'application/json; charset=utf-8']],
+            })
+            await send({'type': 'http.response.body', 'body': json.dumps(
+                {"error": "No autorizado. Añade ?token=... a la URL "
+                          "(o define WS_AUTH_TOKEN vacío para desactivar el control)."}
+            ).encode('utf-8')})
+            return
         if path in ['/', '']:
+            # El token se inyecta en el HTML para que el cliente WebSocket pueda
+            # autenticarse sin que el usuario lo escriba a mano cada vez.
+            html = HTML.replace("__WS_TOKEN__", WS_AUTH_TOKEN)
             await send({
                 'type': 'http.response.start',
                 'status': 200,
                 'headers': [[b'content-type', b'text/html; charset=utf-8']],
             })
-            await send({'type': 'http.response.body', 'body': HTML.encode('utf-8')})
+            await send({'type': 'http.response.body', 'body': html.encode('utf-8')})
         elif path == '/api/proximity-v2':
-            data = json.dumps(proximity_engine.top())
+            data = json.dumps(proximity_engine.top(), ensure_ascii=False)
             await send({
                 'type': 'http.response.start',
                 'status': 200,
+                'headers': [[b'content-type', b'application/json']],
+            })
+            await send({'type': 'http.response.body', 'body': data.encode('utf-8')})
+        elif path in ('/api/status', '/api/health'):
+            # Estado del motor en JSON: sirve para comprobar por HTTP si el
+            # escáner sigue avanzando (o se ha quedado atascado) sin abrir el panel.
+            estado = watchdog_worker.status()
+            data = json.dumps(estado, ensure_ascii=False)
+            await send({
+                'type': 'http.response.start',
+                'status': 200 if estado["salud"] != "ATASCADO" else 503,
                 'headers': [[b'content-type', b'application/json']],
             })
             await send({'type': 'http.response.body', 'body': data.encode('utf-8')})
@@ -2439,6 +3833,11 @@ async def app(scope, receive, send):
         return
 
     if scope['type'] == 'websocket':
+        cliente = (scope.get('client') or [None])[0]
+        if not _acceso_permitido(scope, cliente):
+            log.warning(f"[SEGURIDAD] WebSocket rechazado (sin token válido) desde {cliente}")
+            await send({'type': 'websocket.close', 'code': 4401})
+            return
         await send({'type': 'websocket.accept'})
         APP.websockets.add(send)
         try:
@@ -2460,12 +3859,29 @@ def print_initial_diagnostics():
     print("====================================================")
 
     conn_status = "OK" if IQ_AVAILABLE else "NO_MODULE"
-    print(f"BROKER CONNECTION : {conn_status}")
+    lib_state = "OK (blindada)" if (IQ_AVAILABLE and IQ_LIB_HARDENED) else conn_status
+    print(f"PYTHON            : {sys.version.split()[0]}  ({sys.executable})")
+    print(f"LIBRERÍA BROKER   : {lib_state}")
+    print(f"CREDENCIALES      : {'OK' if (IQ_EMAIL and IQ_PASSWORD) else 'FALTAN en .env (simulación)'}")
+    print(f"CUENTA IQ         : {IQ_MODE}")
+    print(f"BROKER CONNECTION : {'OK' if iq.is_connected() else 'SE CONECTA AL ARRANCAR'}")
     print(f"BROKER CLOCK      : {broker_clock.status.value}")
     print(f"UTC CLOCK         : {broker_clock.now_utc().strftime('%H:%M:%S')}")
     print(f"COLOMBIA CLOCK    : {broker_clock.now_colombia().strftime('%H:%M:%S')}")
+    print(f"AUDITORÍA CSV     : {AUDIT_FILE}")
+    print(f"PANEL WEB         : http://localhost:{PORT}/")
     print("====================================================\n")
 
 if __name__ == "__main__":
+    # La consola de Windows (cp1252) no soporta los emojis del log: sin esto
+    # logging lanza UnicodeEncodeError y se pierden mensajes.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     print_initial_diagnostics()
-    uvicorn.run("app_ali:app", host=HOST, port=PORT, log_level="info", use_colors=False)
+    # Se pasa el objeto ASGI directamente. Con la cadena "app_ali:app" uvicorn
+    # volvía a importar el módulo: todo el estado (reloj, cliente IQ, cachés,
+    # hilos) quedaba DUPLICADO en dos copias del módulo en el mismo proceso.
+    uvicorn.run(app, host=HOST, port=PORT, log_level="info", use_colors=False)

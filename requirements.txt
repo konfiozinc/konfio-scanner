@@ -8,8 +8,17 @@
 # run_scanner.bat usa venv311 en primer lugar (modo REAL).
 # Para el modo REAL se necesita la libreria clasica iqoptionapi
 # (expone  from iqoptionapi.stable_api import IQ_Option).
-# Ya esta instalada en venv311; se instala desde GitHub y requiere
-# Python <= 3.11:  https://github.com/iqoptionapi/iqoptionapi
+# NO esta en PyPI y ademas exige Python <= 3.11; se instala desde GitHub:
+#
+#   venv311\Scripts\python -m pip install ^
+#       https://github.com/iqoptionapi/iqoptionapi/archive/refs/heads/master.zip
+#
+# NOTA sobre el cliente websocket: iqoptionapi declara
+# 'websocket-client==0.56', pero funciona correctamente con la version
+# moderna (1.x), que si tiene ruedas para Python 3.11. Por eso se instala
+# 'websocket-client' SIN fijar version. 'websockets' (otro paquete DISTINTO,
+# el asincrono) lo necesita uvicorn para servir el panel en vivo.
+# ------------------------------------------------------------
 
 # ------------------------------------------------------------
 # venv311 (Python 3.11, MODO REAL) - versiones verificadas en uso
@@ -18,11 +27,14 @@ fastapi==0.110.0
 uvicorn==0.28.0
 numpy==1.26.4
 pandas==2.2.1
+pytz
 ta==0.11.0
-websockets==17.1
-requests==2.34.2
+websockets
+websocket-client
+requests
 python-dotenv==1.0.1
-# iqoptionapi classico (versiones 7.x) - NO via pip; instalar desde GitHub
+# iqoptionapi clasico (versiones 7.x) - NO via pip; instalar desde GitHub
+# (ver la nota de arriba).
 
 # ------------------------------------------------------------
 # venv (Python 3.14, MODO SIMULACION) - solo si NO existe venv311

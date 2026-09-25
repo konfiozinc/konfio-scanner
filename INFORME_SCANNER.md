@@ -1,4 +1,14 @@
-# INFORME DEL SCANNER — AppALÍ GSR (IQ Option) + Puente WhatsApp
+# INFORME DEL SCANNER — AppALÍ GSR (IQ Option)
+
+> **Nota (17-sep-2026):** este informe es un **registro histórico del 8-sep-2026**
+> sobre una versión anterior del escáner. Se conserva por sus recomendaciones de
+> producción (sección 6), varias todavía abiertas.
+> - Ruta actual del proyecto: `C:\Users\PC\Documents\KONFIO_ZINC\BOT\SCANNER`
+>   (la del informe, `...\usuario29\Documents\BOT\SCANNER`, ya no existe).
+> - Estado actual y cambios aplicados: ver `README_INSTRUCCIONES.md`.
+> - El canal externo de publicación que describe este informe **se retiró el
+>   21-sep-2026**: hoy las señales se publican en Alí Binary Options (ver
+>   `README_INSTRUCCIONES.md`).
 
 **Ruta:** `C:\Users\usuario29\Documents\BOT\SCANNER`
 **Fecha del análisis:** sesión actual · **Estado:** se revisaron los archivos, se corrigieron errores,
@@ -9,13 +19,12 @@ se limpiaron artefactos y se documentan las soluciones de producción.
 ## 1. Resumen ejecutivo
 
 El proyecto es un **scanner/robot de señales de trading** conectado a **IQ Option** como
-fuente de verdad, con una **estrategia GSR** sobre velas de 1 minuto, y un **puente local a
-WhatsApp** que publica las señales en un grupo. Consta de:
+fuente de verdad, con una **estrategia GSR** sobre velas de 1 minuto, y una
+**publicación de señales** hacia la app Alí Binary Options. Consta de:
 
 - `app_ali.py` (2.059 líneas) — engine Python: conexión IQ, reloj del broker, catálogo de
   activos, streams en tiempo real, indicadores GSR (Bollinger/RSI/DAMOA) y un dashboard web
   embebido en `http://localhost:8000/` (ASGI/uvicorn + WebSocket).
-- `whatsapp_bridge/` (Node.js + **Baileys**) — recibe `POST /enviar` y manda la señal al grupo.
 - `venv311` (Python 3.11, **modo REAL** con `iqoptionapi`) y `venv` (Python 3.14, simulación).
 
 **Conclusiones clave del análisis:**
@@ -23,10 +32,10 @@ WhatsApp** que publica las señales en un grupo. Consta de:
 | Componente | Estado |
 |---|---|
 | `app_ali.py` | Funciona e importa OK. Se corrigió un **bug en el filtro del universo de activos**. |
-| `whatsapp_bridge` | Correcto (Baileys). La **documentación** describía un stack antiguo (whatsapp-web.js). |
+| Publicación de señales | Integrada con la app Alí Binary Options (Cloud Function o Firestore). |
 | `venv311` | Es el entorno real de producción (trae la librería IQ). |
 | `requirements.txt` / READMEs | Tenían rutas y datos **desactualizados** (proyecto mudado de `KONFIO_ZINC` a `BOT`). |
-| Artefactos | Había ~72 MB de logs/cachés/sesión Puppeteer obsoletos y **credenciales de WhatsApp versionadas en git** (riesgo). |
+| Artefactos | Había ~72 MB de logs/cachés obsoletos y **credenciales de sesión de un canal externo versionadas en git** (riesgo). |
 
 ---
 
@@ -44,16 +53,9 @@ WhatsApp** que publica las señales en un grupo. Consta de:
 | `signals_audit.csv` | Auditoría de señales (4 filas de prueba). | OK (regenerado por la app) |
 | `venv/`, `venv311/`, `__pycache__/` | Entornos y cachés de Python. | OK (no se tocan) |
 
-### `whatsapp_bridge\`
-| Archivo | Propósito | Acción |
-|---|---|---|
-| `index.js` | Puente HTTP → Baileys (envío al grupo). | OK |
-| `bridge.config.json` | Grupo + puerto. | **Editado** (sin campos huérfanos) |
-| `README_WHATSAPP.md` | Guía del puente. | **Editado** (stack correcto) |
-| `run_bridge.bat` | Lanzador del puente. | OK |
-| `package.json` / `package-lock.json` | Dependencias de Node. | OK |
-| `sesion_baileys/` | Sesión activa del número bot. | **Desversionada** (ya no en git) |
-| ~~`sesion/`~~, ~~`.wwebjs_cache/`~~, ~~`qr.txt`~~ | Stack Python anterior (Puppeteer/whatsapp-web.js). | **Eliminados** |
+> **Nota:** aquí figuraba el inventario de un canal externo de publicación que ya
+> no existe en el proyecto (se retiró el 21-sep-2026, sustituido por la
+> integración con Alí Binary Options).
 
 ---
 
@@ -97,29 +99,25 @@ incluyendo pares que antes se perdían por la descripción (`EURNZD-OP`, `AUDUSD
 > de los activos `-OP` dejó el panel con **Real Abiertos = 0** y solo OTC; se **restauró `-OP`**
 > (clasificado como REAL) para que el escáner vuelva a operar el mercado real.
 
-### 3.2 [Corregido] Credenciales de sesión de WhatsApp versionadas en git (riesgo de seguridad)
+### 3.2 [Corregido] Credenciales de sesión versionadas en git (riesgo de seguridad)
 **Dónde:** repo git con remoto **`https://github.com/konfiozinc/konfio-scanner.git`**.
 
-Había **146 archivos** de la sesión Baileys dentro de git: `creds.json`, `sender-key-*`,
-`sender-key-memory-*`, `session-*.json`, `pre-key-*.json`. Contienen las claves privadas del
-número bot. Si ese repositorio se subió a GitHub, **las credenciales quedaron expuestas**.
+Había **146 archivos** con las claves privadas de la sesión de un canal externo dentro de
+git. Si ese repositorio se subía a GitHub, **las credenciales quedaban expuestas**.
 
-**Correcciones:**
-- `.gitignore` ahora ignora `whatsapp_bridge/sesion_baileys/`, `whatsapp_bridge/qr.txt`,
-  `whatsapp_bridge/.wwebjs_cache/`, `log_real.txt`, `signals_audit.csv`, `*_pid.txt`, etc.
-- Se quitó `sesion_baileys/` del índice de git (`git rm -r --cached`) **sin borrar los
-  archivos del disco**, de modo que el puente sigue funcionando.
-- Los archivos siguen **en disco** (no se perdieron la sesión ni el vínculo).
+**Correcciones aplicadas entonces:**
+- `.gitignore` pasó a ignorar esa carpeta de sesión, `log_real.txt`,
+  `signals_audit.csv`, `*_pid.txt`, etc.
+- Se quitó del índice de git (`git rm -r --cached`) **sin borrar los archivos del disco**.
+
+> **Lección vigente:** el equivalente hoy es la **service account de Firebase**
+> (`FIREBASE_SA_PATH`): ese JSON nunca debe versionarse (`.gitignore` ya lo cubre).
 
 ### 3.3 [Corregido] Documentación y rutas obsoletas
 - `README_INSTRUCCIONES.md`: apuntaba a `KONFIO_ZINC\SCANNER\app_ali.py`. El proyecto está
   en `BOT\SCANNER`. Corregido.
 - `README.md`: decía “Abrir `index.html`”. No existe `index.html`; el panel se sirve desde
   `app_ali.py`. Corregido.
-- `README_WHATSAPP.md`: describía `whatsapp-web.js` + Chrome y sesión en `sesion/`. El puente
-  real usa **Baileys** y guarda la sesión en `sesion_baileys/`. Reescribido.
-- `bridge.config.json`: tenía `telefono_bot` y `chromepath`, **no usados** por Baileys. Se
-  dejaron solo `grupo` y `puerto`.
 - `requirements.txt`: ahora distingue `venv311` (REAL) y `venv` (SIM) y lista las versiones
   reales (verificado).
 - `README_INSTRUCCIONES.md` → `run_scanner.bat` → `app_ali.py`: coherentes.
@@ -135,12 +133,10 @@ número bot. Si ese repositorio se subió a GitHub, **las credenciales quedaron 
 | `_bat_test.log`, `_bat_test_err.log` | Logs del `.bat` de prueba (con la ruta vieja `KONFIO_ZINC`). |
 | `log_real.txt` | Volcado de log con la ejecución real. |
 | `_instancia_pid.txt`, `_launcher_pid.txt` | PIDs de procesos **ya inexistentes** (no había servidor escuchando). |
-| `whatsapp_bridge/qr.txt` | Captura de un QR antiguo (ya vinculado). |
-| `whatsapp_bridge/sesion/` (**~71,5 MB**) | Perfil de Chrome/Puppeteer del stack **anterior** (whatsapp-web.js). El puente actual usa Baileys (`sesion_baileys/`). |
-| `whatsapp_bridge/.wwebjs_cache/` (~0,6 MB) | Caché de whatsapp-web.js, en desuso. |
+| Carpeta de sesión del canal externo (**~71,5 MB**) | Perfil de navegador del stack antiguo, en desuso. |
+| Caché de ese stack (~0,6 MB) | En desuso. |
 
-**Espacio liberado: ~72 MB.** Se conservaron: `venv`, `venv311` (entornos de ejecución),
-`node_modules` (dependencias del puente) y `sesion_baileys/` (sesión activa).
+**Espacio liberado: ~72 MB.** Se conservaron: `venv`, `venv311` (entornos de ejecución).
 
 > Los archivos borrados que estaban versionados quedan como `deleted` en git; cuando el
 > autor quiera, debe hacer **commit** de los cambios (ver §6).
@@ -156,7 +152,8 @@ número bot. Si ese repositorio se subió a GitHub, **las credenciales quedaron 
 2. **Modo `PRACTICE` por defecto** (`IQ_ACCOUNT_TYPE=PRACTICE`). Bueno para validar; cuando se
    pase a real debe hacerse de forma controlada.
 3. **Exposición de red.** El servidor escucha en `0.0.0.0:8000`. Si no se necesita acceso
-   remoto, conviene limitarlo a `127.0.0.1`. El puente ya escucha solo en `127.0.0.1:8120`.
+   remoto, conviene limitarlo a `127.0.0.1` o protegerlo con `WS_AUTH_TOKEN`
+   (ya implementado).
 4. **Múltiples hilos sobre una única conexión IQ.** El engine usa un `ThreadPoolExecutor` para
    `get_candles`, streams en paralelo y refresco del catálogo. En los logs aparece
    `ERROR: Connection is already closed.` y reconexiones forzadas. Es el punto más frágil de
@@ -173,11 +170,12 @@ número bot. Si ese repositorio se subió a GitHub, **las credenciales quedaron 
 Priorizadas por impacto/riesgo.
 
 ### 6.1 Seguridad: limpiar credenciales del historial de git (ALTA)
-- Verificar si `sesion_baileys/` (y sus claves) llegaron al remoto:
-  `git -C . log --oneline --all -- whatsapp_bridge/sesion_baileys`.
-- **Si ya se subió:** además del commit de borrado, **rotar** la sesión de WhatsApp (desvincular
-  el número y volver a vincular) y considerar limpiar el historial con `git filter-repo`/`BFG`.
-  GitHub suele avisar con *secret scanning*.
+- Verificar si las claves de sesión llegaron al remoto:
+  `git -C . log --all -p | findstr creds` (o el buscador que prefieras).
+- **Si ya se subieron:** además del commit de borrado, **rotar** esas credenciales y considerar
+  limpiar el historial con `git filter-repo`/`BFG`. GitHub avisa con *secret scanning*.
+- **Estado verificado el 21-sep-2026:** el repo público está LIMPIO (el `.env` nunca se subió);
+  las claves antiguas sólo permanecen en 3 ramas locales de respaldo.
 - Commit de limpieza: `git add . && git commit -m "chore: quitar credenciales y artefactos"`.
 
 ### 6.2 Credenciales por `.env` (ALTA, fácil)
@@ -186,8 +184,8 @@ Priorizadas por impacto/riesgo.
    IQ_EMAIL=tu_correo@dominio.com
    IQ_PASSWORD=tu_contraseña
    IQ_ACCOUNT_TYPE=PRACTICE
-   WHATSAPP_BRIDGE_URL=http://127.0.0.1:8120
-   WHATSAPP_BRIDGE_ENABLED=1
+   APP_SIGNAL_URL=
+   APP_SIGNAL_SECRET=
    ```
 2. Cargarlo al inicio, p. ej. al principio de `app_ali.py`:
    ```python
@@ -233,12 +231,12 @@ Priorizadas por impacto/riesgo.
 ### 6.7 Datos y métricas (MEDIA)
 - Guardar señales en una **base local (SQLite)** en lugar de solo CSV, y calcular métricas
   (win-rate por par/dirección/hora) para validar la estrategia antes de arriesgar capital real.
-- (Opcional) publicar señales por otro canal (webhook/Telegram) además de WhatsApp, para no
-  depender de un único mecanismo.
+- (Opcional) publicar señales por un segundo canal (webhook/Telegram) además de la app, para
+  no depender de un único mecanismo.
 
 ### 6.8 Disciplina de trading (ALTA recomendación)
 - Seguir en **PRACTICE** hasta tener un histórico validado de señales y métricas.
-- Mantener el **aviso de riesgo** (ya presente en el mensaje de WhatsApp) y añadir un panel de
+- Mantener el **aviso de riesgo** en el mensaje publicado y añadir un panel de
   **confirmación manual** (filtro de riesgo) antes de considerar operaciones reales.
 
 ---
@@ -246,15 +244,13 @@ Priorizadas por impacto/riesgo.
 ## 7. Archivos modificados / creados / eliminados en esta sesión
 
 **Editados:** `.gitignore`, `README.md`, `README_INSTRUCCIONES.md`, `app_ali.py`,
-`requirements.txt`, `whatsapp_bridge/README_WHATSAPP.md`, `whatsapp_bridge/bridge.config.json`.
+`requirements.txt` y la documentación del canal externo (ya retirado).
 
 **Eliminados:** `_probe_forex.py`, `_probe_open.py`, `_scan_err.log`, `_scan_out.log`,
-`_bat_test.log`, `_bat_test_err.log`, `log_real.txt`, `_instancia_pid.txt`, `_launcher_pid.txt`,
-`whatsapp_bridge/qr.txt`, `whatsapp_bridge/sesion/` (dir), `whatsapp_bridge/.wwebjs_cache/` (dir).
-
-**Desversionados de git (se conservan en disco):** `whatsapp_bridge/sesion_baileys/`.
+`_bat_test.log`, `_bat_test_err.log`, `log_real.txt`, `_instancia_pid.txt`, `_launcher_pid.txt`
+y las carpetas de sesión/caché del canal externo.
 
 **Creado:** este informe `INFORME_SCANNER.md`.
 
 *Cualquier cambio queda **sin commit** para revisión del autor. Validado: `app_ali.py` importa y
-compila OK en `venv311`; `index.js` pasa `node --check`.*
+compila OK en `venv311`.*

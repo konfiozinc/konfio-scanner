@@ -19,7 +19,7 @@ El motor recorre una máquina de estados por activo (`GSRPhase`) sobre velas de 
 | `OBSERVANDO` | Busca la **1ª vela**: si es `GREEN` y su **cuerpo está ≥40% fuera de la banda superior** → `PRIMERA_VELA` (dirección `PUT`). Si es `RED` y su cuerpo rompe ≥40% la banda inferior → dirección `CALL`. |
 | `PRIMERA_VELA` | Busca la **2ª vela consecutiva** del **mismo color** y también ≥40% fuera de banda → `SEGUNDA_VELA`. Si cambia de color o no supera el 40%, se resetea. |
 | `SEGUNDA_VELA` | **Confirmación** con RSI y DAMOA: para `PUT` exige `RSI ≥ 80` **y** `DAMOA ≥ +10`; para `CALL` exige `RSI ≤ 20` **y** `DAMOA ≤ -10`. Si no se cumple → reset. Si cumple → `LISTA`. |
-| `LISTA` | Dispara la señal (`fire_signal`), valida elegibilidad, la registra en `signals_audit.csv` y la publica al grupo por WhatsApp. |
+| `LISTA` | Dispara la señal (`fire_signal`), valida elegibilidad, la registra en `signals_audit.csv` y la publica en la app Alí Binary Options. |
 
 **Interpretación:** es una estrategia de **reversión a la media tras una ruptura de 2 velas**.
 Dos velas del mismo color rompen la banda de Bollinger (≥40% del cuerpo por fuera) y, con RSI en
@@ -185,7 +185,7 @@ Con el backtest, barrer `BB_STD` (1.8–2.4), `RSI` (75–85 / 15–25), `DAMOA`
 |---|---|---|---|
 | **P1** | Piso de volatilidad (`vol > precio*1e-6`) + acotado a `±DAMOA_CLAMP(50)` | `app_ali.py`→`calculate_indicators` | DAMOA ya no explota a miles (`9564`, `-532`); umbral `±10` vuelve a ser significativo. |
 | **P2** | Indicadores calculados solo con velas cerradas (`candles[:-1]`) | `app_ali.py`→`calculate_indicators` | Elimina el *look-ahead*: BB/RSI/DAMOA y el body-outside apuntan a la misma vela cerrada. |
-| **P3** | Confirmación de reversión antes de disparar | `AssetState.reversal_pending/confirm_deadline`, `_confirm_reversal`, rama `LISTA` del `ScannerPipeline` | La señal (WhatsApp) solo sale tras una vela que vaya en contra del patrón (PUT→roja, CALL→verde), con ventana de 3 velas. |
+| **P3** | Confirmación de reversión antes de disparar | `AssetState.reversal_pending/confirm_deadline`, `_confirm_reversal`, rama `LISTA` del `ScannerPipeline` | La señal solo se publica tras una vela que vaya en contra del patrón (PUT→roja, CALL→verde), con ventana de 3 velas. |
 | **P4** | Filtro de tendencia (EMA50 vs EMA150 normalizada por std) | `_trend_ok`, `GSRReadyEngine.confirm`, `IndicatorSnapshot.trend_ok` | Descarta la señal si el mercado está en tendencia fuerte (donde la ruptura suele continuar, no revertir). |
 | **P5** | Filtro de sesión/liquidez (08–17 UTC, sin rollover 21 UTC ni fin de semana) | `is_liquid_session`, `GSRReadyEngine.confirm` | Solo arma la reversión en horas de alta liquidez; evita velas erráticas. Se desactiva con `SESSION_FILTER_ENABLED=0`. |
 | **P7** | Backtest sobre velas M1 cerradas | `backtest_gsr.py` | Mide win-rate, expectancy, profit-factor y racha de pérdidas, con comparación base vs mejoras. |
@@ -204,7 +204,7 @@ LIQUID_SESSION_START = 8 / LIQUID_SESSION_END = 17          # ventana UTC (P5)
 - **P3/P4 cambian qué señales se emiten** (menos, pero de mayor calidad): por diseño, reduce señales
   falsas en tendencia fuerte. Se recomienda **validar con backtest (P7)** antes de dar peso real.
 - **Cosmético en el dashboard:** al estar en `LISTA` a la espera de la vela de reversión, el tablero
-  marca *patrón cercano*; la señal a WhatsApp sale solo con la confirmación. Si no llega la reversión,
+  marca *patrón cercano*; la señal se publica solo con la confirmación. Si no llega la reversión,
   no se envía señal (el patrón se descarta al pasar la ventana).
 - Se mantiene **modo PRACTICE** hasta tener métricas de win-rate/expectancy.
 

@@ -1,0 +1,15 @@
+{
+  "name": "whatsapp-bridge-appali",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Puente local: recibe señales del escáner AppALI y las publica en un grupo de WhatsApp (Baileys).",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "pino": "^9.5.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
